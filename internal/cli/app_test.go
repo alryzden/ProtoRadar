@@ -153,20 +153,34 @@ func TestCommandsUseHTTPAPI(t *testing.T) {
 			defer file.Close()
 			uploadedArtifact, _ = io.ReadAll(file)
 			writeJSON(t, w, http.StatusCreated, map[string]any{
-				"version": map[string]any{
-					"id":         "version-1",
-					"module_id":  "user-api",
-					"version":    publishedVersion,
-					"digest":     "sha256:server-digest",
-					"status":     "published",
-					"created_at": "2026-06-04T12:00:00Z",
+				"module":     "user-api",
+				"version":    publishedVersion,
+				"status":     "published",
+				"created_at": "2026-06-04T12:00:00Z",
+				"source_artifact": map[string]any{
+					"kind":            "source_archive",
+					"checksum_sha256": "server-source-checksum",
+					"size_bytes":      len(uploadedArtifact),
 				},
-				"artifact": map[string]any{
-					"id":                "artifact-1",
-					"module_version_id": "version-1",
-					"checksum_sha256":   "server-checksum",
-					"size_bytes":        len(uploadedArtifact),
-					"created_at":        "2026-06-04T12:00:00Z",
+				"buf_image_artifact": map[string]any{
+					"kind":            "buf_image",
+					"checksum_sha256": "server-buf-image-checksum",
+					"size_bytes":      123,
+				},
+				"buf": map[string]any{
+					"config_present": true,
+					"lock_present":   true,
+					"lint_status":    "warning",
+				},
+				"metadata_summary": map[string]any{
+					"files":       2,
+					"packages":    1,
+					"services":    1,
+					"methods":     2,
+					"messages":    3,
+					"fields":      4,
+					"enums":       1,
+					"enum_values": 2,
 				},
 			})
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/modules/user-api/versions/v1.0.0/artifact":
@@ -202,6 +216,8 @@ func TestCommandsUseHTTPAPI(t *testing.T) {
 	}
 
 	protoDir := t.TempDir()
+	writeFile(t, filepath.Join(protoDir, "buf.yaml"), "version: v2\n")
+	writeFile(t, filepath.Join(protoDir, "buf.lock"), "deps: []\n")
 	writeFile(t, filepath.Join(protoDir, "user.proto"), "syntax = \"proto3\";")
 	output.Reset()
 	if err := app.Run(context.Background(), []string{"push", "user-api", "--version", "v1.0.0", "--path", protoDir}); err != nil {
@@ -210,8 +226,18 @@ func TestCommandsUseHTTPAPI(t *testing.T) {
 	if publishedVersion != "v1.0.0" {
 		t.Fatalf("published version = %q", publishedVersion)
 	}
-	if len(archiveNames(t, uploadedArtifact)) != 1 {
-		t.Fatalf("uploaded artifact did not contain one proto")
+	names := archiveNames(t, uploadedArtifact)
+	if !strings.Contains(strings.Join(names, ","), "buf.yaml") || !strings.Contains(strings.Join(names, ","), "buf.lock") || !strings.Contains(strings.Join(names, ","), "user.proto") {
+		t.Fatalf("uploaded artifact names = %#v", names)
+	}
+	if !strings.Contains(output.String(), "Lint status: warning") {
+		t.Fatalf("push output missing lint status: %q", output.String())
+	}
+	if !strings.Contains(output.String(), "Metadata: files=2 packages=1 services=1 methods=2 messages=3 fields=4 enums=1 enum_values=2") {
+		t.Fatalf("push output missing metadata summary: %q", output.String())
+	}
+	if !strings.Contains(output.String(), "Buf image checksum SHA-256: server-buf-image-checksum") {
+		t.Fatalf("push output missing buf image checksum: %q", output.String())
 	}
 
 	outputDir := filepath.Join(t.TempDir(), "downloaded")
@@ -221,6 +247,33 @@ func TestCommandsUseHTTPAPI(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(outputDir, "user.proto")); err != nil {
 		t.Fatalf("pulled proto: %v", err)
+	}
+}
+
+func TestPushDisplaysAPIErrorsClearly(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer prr_token" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		if r.Method == http.MethodPost && r.URL.Path == "/api/v1/modules/user-api/versions" {
+			writeJSON(t, w, http.StatusUnprocessableEntity, map[string]string{"error": "buf build failed"})
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	saveCLIConfig(t, configPath, server.URL)
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "buf.yaml"), "version: v2\n")
+	writeFile(t, filepath.Join(root, "user.proto"), "syntax = \"proto3\";")
+
+	app := App{ConfigPath: configPath, HTTPClient: server.Client(), Out: &bytes.Buffer{}}
+	err := app.Run(context.Background(), []string{"push", "user-api", "--version", "v1.0.0", "--path", root})
+	if err == nil || !strings.Contains(err.Error(), "buf build failed") {
+		t.Fatalf("error = %v", err)
 	}
 }
 

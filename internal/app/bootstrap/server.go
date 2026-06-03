@@ -8,6 +8,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/alryzden/ProtoRadar/internal/config"
+	"github.com/alryzden/ProtoRadar/internal/infrastructure/bufcli"
 	"github.com/alryzden/ProtoRadar/internal/repository/postgres"
 	"github.com/alryzden/ProtoRadar/internal/usecase/registry"
 )
@@ -40,21 +41,39 @@ func NewServer(ctx context.Context, cfg config.RuntimeConfig, migrations fs.FS) 
 		pool.Close()
 		return nil, err
 	}
+	bufWorkflow, err := bufcli.NewWorkflow(bufcli.Config{
+		BinaryPath:     cfg.Buf.BinaryPath,
+		BuildTimeout:   cfg.Buf.BuildTimeout,
+		LintTimeout:    cfg.Buf.LintTimeout,
+		LintMode:       cfg.Buf.LintMode,
+		RequireConfig:  cfg.Buf.RequireConfig,
+		MaxReportBytes: cfg.Buf.MaxReportBytes,
+	})
+	if err != nil {
+		pool.Close()
+		return nil, err
+	}
 
 	registryService := registry.NewService(
 		postgres.NewModuleRepository(db),
 		postgres.NewModuleVersionRepository(db),
 		postgres.NewArtifactRepository(db),
+		postgres.NewBufConfigRepository(db),
+		postgres.NewDescriptorMetadataRepository(db),
 		postgres.NewAPITokenRepository(db),
 		db,
 		postgres.NewOutboxWriter(db),
 		artifactStore,
+		bufWorkflow,
 		registry.SystemClock{},
 		registry.RandomIDGenerator{},
 		registry.RandomTokenGenerator{},
 		registry.Options{
-			MaxArtifactSizeBytes: cfg.Registry.MaxArtifactSizeBytes,
-			TokenHashSecret:      cfg.Auth.TokenHashSecret,
+			MaxArtifactSizeBytes:           cfg.Registry.MaxArtifactSizeBytes,
+			MaxSourceUncompressedSizeBytes: cfg.Registry.MaxArtifactSizeBytes,
+			TokenHashSecret:                cfg.Auth.TokenHashSecret,
+			BufRequireConfig:               cfg.Buf.RequireConfig,
+			BufLintMode:                    cfg.Buf.LintMode,
 		},
 	)
 

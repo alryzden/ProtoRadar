@@ -4,6 +4,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestDefaults(t *testing.T) {
@@ -20,6 +21,24 @@ func TestDefaults(t *testing.T) {
 	}
 	if cfg.Registry.MaxArtifactSizeBytes != defaultMaxArtifactSizeBytes {
 		t.Fatalf("max artifact size = %d", cfg.Registry.MaxArtifactSizeBytes)
+	}
+	if cfg.Buf.BinaryPath != "buf" {
+		t.Fatalf("buf binary path = %q", cfg.Buf.BinaryPath)
+	}
+	if cfg.Buf.BuildTimeout != "30s" {
+		t.Fatalf("buf build timeout = %q", cfg.Buf.BuildTimeout)
+	}
+	if cfg.Buf.LintTimeout != "30s" {
+		t.Fatalf("buf lint timeout = %q", cfg.Buf.LintTimeout)
+	}
+	if cfg.Buf.LintMode != BufLintModeWarn {
+		t.Fatalf("buf lint mode = %q", cfg.Buf.LintMode)
+	}
+	if !cfg.Buf.RequireConfig {
+		t.Fatalf("buf require config should default true")
+	}
+	if cfg.Buf.MaxReportBytes != defaultBufMaxReportBytes {
+		t.Fatalf("buf max report bytes = %d", cfg.Buf.MaxReportBytes)
 	}
 }
 
@@ -63,6 +82,41 @@ func TestValidateFailuresAreDeterministic(t *testing.T) {
 	}
 
 	cfg.Registry.MaxArtifactSizeBytes = 1
+	cfg.Buf.BinaryPath = ""
+	want = "buf.binary_path is required"
+	if err := cfg.Validate(); err == nil || err.Error() != want {
+		t.Fatalf("error = %v, want %q", err, want)
+	}
+
+	cfg.Buf.BinaryPath = "buf"
+	cfg.Buf.BuildTimeout = "0s"
+	want = "buf.build_timeout must be positive"
+	if err := cfg.Validate(); err == nil || err.Error() != want {
+		t.Fatalf("error = %v, want %q", err, want)
+	}
+
+	cfg.Buf.BuildTimeout = "30s"
+	cfg.Buf.LintTimeout = "0s"
+	want = "buf.lint_timeout must be positive"
+	if err := cfg.Validate(); err == nil || err.Error() != want {
+		t.Fatalf("error = %v, want %q", err, want)
+	}
+
+	cfg.Buf.LintTimeout = "30s"
+	cfg.Buf.LintMode = "strict"
+	want = "buf.lint_mode must be one of disabled, warn, enforce"
+	if err := cfg.Validate(); err == nil || err.Error() != want {
+		t.Fatalf("error = %v, want %q", err, want)
+	}
+
+	cfg.Buf.LintMode = BufLintModeWarn
+	cfg.Buf.MaxReportBytes = 0
+	want = "buf.max_report_bytes must be positive"
+	if err := cfg.Validate(); err == nil || err.Error() != want {
+		t.Fatalf("error = %v, want %q", err, want)
+	}
+
+	cfg.Buf.MaxReportBytes = 1
 	want = "database.url is required"
 	if err := cfg.Validate(); err == nil || err.Error() != want {
 		t.Fatalf("error = %v, want %q", err, want)
@@ -82,6 +136,12 @@ func TestRuntimeMapping(t *testing.T) {
 	cfg.Auth.TokenHashSecret = "hash-secret"
 	cfg.Auth.BootstrapToken = "bootstrap"
 	cfg.Registry.MaxArtifactSizeBytes = 42
+	cfg.Buf.BinaryPath = "/usr/local/bin/buf"
+	cfg.Buf.BuildTimeout = "45s"
+	cfg.Buf.LintTimeout = "15s"
+	cfg.Buf.LintMode = BufLintModeEnforce
+	cfg.Buf.RequireConfig = false
+	cfg.Buf.MaxReportBytes = 4096
 
 	runtime, err := cfg.Runtime()
 	if err != nil {
@@ -112,6 +172,24 @@ func TestRuntimeMapping(t *testing.T) {
 	if runtime.Registry.MaxArtifactSizeBytes != 42 {
 		t.Fatalf("max artifact size = %d", runtime.Registry.MaxArtifactSizeBytes)
 	}
+	if runtime.Buf.BinaryPath != "/usr/local/bin/buf" {
+		t.Fatalf("buf binary path = %q", runtime.Buf.BinaryPath)
+	}
+	if runtime.Buf.BuildTimeout != 45*time.Second {
+		t.Fatalf("buf build timeout = %s", runtime.Buf.BuildTimeout)
+	}
+	if runtime.Buf.LintTimeout != 15*time.Second {
+		t.Fatalf("buf lint timeout = %s", runtime.Buf.LintTimeout)
+	}
+	if runtime.Buf.LintMode != BufLintModeEnforce {
+		t.Fatalf("buf lint mode = %q", runtime.Buf.LintMode)
+	}
+	if runtime.Buf.RequireConfig {
+		t.Fatalf("buf require config should be false")
+	}
+	if runtime.Buf.MaxReportBytes != 4096 {
+		t.Fatalf("buf max report bytes = %d", runtime.Buf.MaxReportBytes)
+	}
 }
 
 func TestLoadFileAndEnvOverrides(t *testing.T) {
@@ -132,6 +210,13 @@ auth:
   token_hash_secret: yaml-secret
 registry:
   max_artifact_size_bytes: 128
+buf:
+  binary_path: /yaml/bin/buf
+  build_timeout: 20s
+  lint_timeout: 25s
+  lint_mode: disabled
+  require_config: false
+  max_report_bytes: 8192
 database:
   url: postgres://postgres:postgres@localhost:5432/protoradar
 `))
@@ -144,6 +229,12 @@ database:
 
 	t.Setenv("PROTORADAR_STORAGE_S3_BUCKET", "env-bucket")
 	t.Setenv("PROTORADAR_REGISTRY_MAX_ARTIFACT_SIZE_BYTES", "256")
+	t.Setenv("PROTORADAR_BUF_BINARY_PATH", "/env/bin/buf")
+	t.Setenv("PROTORADAR_BUF_BUILD_TIMEOUT", "40s")
+	t.Setenv("PROTORADAR_BUF_LINT_TIMEOUT", "50s")
+	t.Setenv("PROTORADAR_BUF_LINT_MODE", "enforce")
+	t.Setenv("PROTORADAR_BUF_REQUIRE_CONFIG", "true")
+	t.Setenv("PROTORADAR_BUF_MAX_REPORT_BYTES", "12345")
 	t.Setenv("PROTORADAR_DATABASE_URL", "postgres://env")
 
 	cfg, err := LoadFile(file.Name())
@@ -160,7 +251,91 @@ database:
 	if cfg.Database.URL != "postgres://env" {
 		t.Fatalf("database url = %q", cfg.Database.URL)
 	}
+	if cfg.Buf.BinaryPath != "/env/bin/buf" {
+		t.Fatalf("buf binary path = %q", cfg.Buf.BinaryPath)
+	}
+	if cfg.Buf.BuildTimeout != "40s" {
+		t.Fatalf("buf build timeout = %q", cfg.Buf.BuildTimeout)
+	}
+	if cfg.Buf.LintTimeout != "50s" {
+		t.Fatalf("buf lint timeout = %q", cfg.Buf.LintTimeout)
+	}
+	if cfg.Buf.LintMode != BufLintModeEnforce {
+		t.Fatalf("buf lint mode = %q", cfg.Buf.LintMode)
+	}
+	if !cfg.Buf.RequireConfig {
+		t.Fatalf("buf require config should be true")
+	}
+	if cfg.Buf.MaxReportBytes != 12345 {
+		t.Fatalf("buf max report bytes = %d", cfg.Buf.MaxReportBytes)
+	}
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("validate: %v", err)
 	}
+}
+
+func TestBufValidationFailures(t *testing.T) {
+	tests := []struct {
+		name string
+		edit func(*Config)
+		want string
+	}{
+		{
+			name: "invalid lint mode",
+			edit: func(cfg *Config) {
+				cfg.Buf.LintMode = "strict"
+			},
+			want: "buf.lint_mode must be one of disabled, warn, enforce",
+		},
+		{
+			name: "missing binary path",
+			edit: func(cfg *Config) {
+				cfg.Buf.BinaryPath = " "
+			},
+			want: "buf.binary_path is required",
+		},
+		{
+			name: "non-positive build timeout",
+			edit: func(cfg *Config) {
+				cfg.Buf.BuildTimeout = "-1s"
+			},
+			want: "buf.build_timeout must be positive",
+		},
+		{
+			name: "non-positive lint timeout",
+			edit: func(cfg *Config) {
+				cfg.Buf.LintTimeout = "0s"
+			},
+			want: "buf.lint_timeout must be positive",
+		},
+		{
+			name: "non-positive max report bytes",
+			edit: func(cfg *Config) {
+				cfg.Buf.MaxReportBytes = 0
+			},
+			want: "buf.max_report_bytes must be positive",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := validConfig()
+			tt.edit(&cfg)
+
+			if err := cfg.Validate(); err == nil || err.Error() != tt.want {
+				t.Fatalf("error = %v, want %q", err, tt.want)
+			}
+		})
+	}
+}
+
+func validConfig() Config {
+	cfg := Defaults()
+	cfg.Database.URL = "postgres://postgres:postgres@localhost:5432/protoradar"
+	cfg.Storage.S3.Endpoint = "http://localhost:9000"
+	cfg.Storage.S3.Bucket = "protoradar"
+	cfg.Storage.S3.AccessKey = "minio"
+	cfg.Storage.S3.SecretKey = "password"
+	cfg.Auth.TokenHashSecret = "hash-secret"
+	return cfg
 }

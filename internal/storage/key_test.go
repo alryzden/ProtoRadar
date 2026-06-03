@@ -17,7 +17,13 @@ func TestBuildArtifactKey(t *testing.T) {
 	}
 
 	got := BuildArtifactKey(module, version, " checksum ")
-	want := "modules/billing-api/versions/v1.2.3/sha256-checksum.tar.gz"
+	want := "modules/billing-api/versions/v1.2.3/source/sha256-checksum.tar.gz"
+	if got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+
+	got = BuildBufImageKey(module, version, " checksum ")
+	want = "modules/billing-api/versions/v1.2.3/buf-image/sha256-checksum.binpb"
 	if got != want {
 		t.Fatalf("got %q, want %q", got, want)
 	}

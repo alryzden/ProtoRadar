@@ -5,9 +5,17 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 )
 
 const defaultMaxArtifactSizeBytes int64 = 100 * 1024 * 1024
+const defaultBufMaxReportBytes = 16 * 1024
+
+const (
+	BufLintModeDisabled = "disabled"
+	BufLintModeWarn     = "warn"
+	BufLintModeEnforce  = "enforce"
+)
 
 type Config struct {
 	Server   ServerConfig   `yaml:"server"`
@@ -15,6 +23,7 @@ type Config struct {
 	Storage  StorageConfig  `yaml:"storage"`
 	Auth     AuthConfig     `yaml:"auth"`
 	Registry RegistryConfig `yaml:"registry"`
+	Buf      BufConfig      `yaml:"buf"`
 }
 
 type ServerConfig struct {
@@ -47,6 +56,15 @@ type RegistryConfig struct {
 	MaxArtifactSizeBytes int64 `yaml:"max_artifact_size_bytes"`
 }
 
+type BufConfig struct {
+	BinaryPath     string `yaml:"binary_path"`
+	BuildTimeout   string `yaml:"build_timeout"`
+	LintTimeout    string `yaml:"lint_timeout"`
+	LintMode       string `yaml:"lint_mode"`
+	RequireConfig  bool   `yaml:"require_config"`
+	MaxReportBytes int    `yaml:"max_report_bytes"`
+}
+
 func Defaults() Config {
 	return Config{
 		Server: ServerConfig{
@@ -60,6 +78,14 @@ func Defaults() Config {
 		},
 		Registry: RegistryConfig{
 			MaxArtifactSizeBytes: defaultMaxArtifactSizeBytes,
+		},
+		Buf: BufConfig{
+			BinaryPath:     "buf",
+			BuildTimeout:   "30s",
+			LintTimeout:    "30s",
+			LintMode:       BufLintModeWarn,
+			RequireConfig:  true,
+			MaxReportBytes: defaultBufMaxReportBytes,
 		},
 	}
 }
@@ -162,6 +188,26 @@ func applyYAMLValue(cfg *Config, path string, value string) error {
 			return fmt.Errorf("registry.max_artifact_size_bytes must be an integer")
 		}
 		cfg.Registry.MaxArtifactSizeBytes = parsed
+	case "buf.binary_path":
+		cfg.Buf.BinaryPath = value
+	case "buf.build_timeout":
+		cfg.Buf.BuildTimeout = value
+	case "buf.lint_timeout":
+		cfg.Buf.LintTimeout = value
+	case "buf.lint_mode":
+		cfg.Buf.LintMode = value
+	case "buf.require_config":
+		parsed, err := strconv.ParseBool(value)
+		if err != nil {
+			return fmt.Errorf("buf.require_config must be a boolean")
+		}
+		cfg.Buf.RequireConfig = parsed
+	case "buf.max_report_bytes":
+		parsed, err := strconv.Atoi(value)
+		if err != nil {
+			return fmt.Errorf("buf.max_report_bytes must be an integer")
+		}
+		cfg.Buf.MaxReportBytes = parsed
 	default:
 		return fmt.Errorf("%s is not a supported config field", path)
 	}
@@ -210,6 +256,32 @@ func (c *Config) ApplyEnv() error {
 		}
 		c.Registry.MaxArtifactSizeBytes = parsed
 	}
+	if value, ok := os.LookupEnv("PROTORADAR_BUF_BINARY_PATH"); ok {
+		c.Buf.BinaryPath = value
+	}
+	if value, ok := os.LookupEnv("PROTORADAR_BUF_BUILD_TIMEOUT"); ok {
+		c.Buf.BuildTimeout = value
+	}
+	if value, ok := os.LookupEnv("PROTORADAR_BUF_LINT_TIMEOUT"); ok {
+		c.Buf.LintTimeout = value
+	}
+	if value, ok := os.LookupEnv("PROTORADAR_BUF_LINT_MODE"); ok {
+		c.Buf.LintMode = value
+	}
+	if value, ok := os.LookupEnv("PROTORADAR_BUF_REQUIRE_CONFIG"); ok {
+		parsed, err := strconv.ParseBool(value)
+		if err != nil {
+			return fmt.Errorf("buf.require_config must be a boolean")
+		}
+		c.Buf.RequireConfig = parsed
+	}
+	if value, ok := os.LookupEnv("PROTORADAR_BUF_MAX_REPORT_BYTES"); ok {
+		parsed, err := strconv.Atoi(value)
+		if err != nil {
+			return fmt.Errorf("buf.max_report_bytes must be an integer")
+		}
+		c.Buf.MaxReportBytes = parsed
+	}
 	return nil
 }
 
@@ -224,6 +296,9 @@ func (c Config) Validate() error {
 		return err
 	}
 	if err := c.validateRegistry(); err != nil {
+		return err
+	}
+	if err := c.validateBuf(); err != nil {
 		return err
 	}
 	if err := c.validateDatabase(); err != nil {
@@ -279,8 +354,38 @@ func (c Config) validateRegistry() error {
 	return nil
 }
 
+func (c Config) validateBuf() error {
+	if strings.TrimSpace(c.Buf.BinaryPath) == "" {
+		return fmt.Errorf("buf.binary_path is required")
+	}
+	if _, err := parsePositiveDuration("buf.build_timeout", c.Buf.BuildTimeout); err != nil {
+		return err
+	}
+	if _, err := parsePositiveDuration("buf.lint_timeout", c.Buf.LintTimeout); err != nil {
+		return err
+	}
+	switch c.Buf.LintMode {
+	case BufLintModeDisabled, BufLintModeWarn, BufLintModeEnforce:
+	default:
+		return fmt.Errorf("buf.lint_mode must be one of disabled, warn, enforce")
+	}
+	if c.Buf.MaxReportBytes <= 0 {
+		return fmt.Errorf("buf.max_report_bytes must be positive")
+	}
+	return nil
+}
+
 func (c Config) Runtime() (RuntimeConfig, error) {
 	if err := c.Validate(); err != nil {
+		return RuntimeConfig{}, err
+	}
+
+	buildTimeout, err := parsePositiveDuration("buf.build_timeout", c.Buf.BuildTimeout)
+	if err != nil {
+		return RuntimeConfig{}, err
+	}
+	lintTimeout, err := parsePositiveDuration("buf.lint_timeout", c.Buf.LintTimeout)
+	if err != nil {
 		return RuntimeConfig{}, err
 	}
 
@@ -308,5 +413,24 @@ func (c Config) Runtime() (RuntimeConfig, error) {
 		Registry: RuntimeRegistryConfig{
 			MaxArtifactSizeBytes: c.Registry.MaxArtifactSizeBytes,
 		},
+		Buf: RuntimeBufConfig{
+			BinaryPath:     c.Buf.BinaryPath,
+			BuildTimeout:   buildTimeout,
+			LintTimeout:    lintTimeout,
+			LintMode:       c.Buf.LintMode,
+			RequireConfig:  c.Buf.RequireConfig,
+			MaxReportBytes: c.Buf.MaxReportBytes,
+		},
 	}, nil
+}
+
+func parsePositiveDuration(path string, value string) (time.Duration, error) {
+	parsed, err := time.ParseDuration(value)
+	if err != nil {
+		return 0, fmt.Errorf("%s must be a valid duration", path)
+	}
+	if parsed <= 0 {
+		return 0, fmt.Errorf("%s must be positive", path)
+	}
+	return parsed, nil
 }

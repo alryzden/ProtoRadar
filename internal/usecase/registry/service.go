@@ -9,21 +9,27 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 
 	"github.com/alryzden/ProtoRadar/internal/domain"
 	"github.com/alryzden/ProtoRadar/internal/integration/protoradarevents"
 	"github.com/alryzden/ProtoRadar/internal/outbox"
 	"github.com/alryzden/ProtoRadar/internal/storage"
+	"github.com/alryzden/ProtoRadar/internal/workspace"
 )
 
 type Service struct {
 	modules        domain.ModuleRepository
 	versions       domain.ModuleVersionRepository
-	artifacts      domain.ArtifactRepository
+	artifacts      domain.ModuleVersionArtifactRepository
+	bufConfigs     domain.BufConfigRepository
+	metadata       domain.DescriptorMetadataRepository
 	tokens         domain.APITokenRepository
 	transactions   domain.RegistryTransactionManager
 	outbox         outbox.Writer
 	artifactStore  storage.ArtifactStore
+	bufWorkflow    BufWorkflow
 	clock          Clock
 	ids            IDGenerator
 	tokenGenerator TokenGenerator
@@ -33,11 +39,14 @@ type Service struct {
 func NewService(
 	modules domain.ModuleRepository,
 	versions domain.ModuleVersionRepository,
-	artifacts domain.ArtifactRepository,
+	artifacts domain.ModuleVersionArtifactRepository,
+	bufConfigs domain.BufConfigRepository,
+	metadata domain.DescriptorMetadataRepository,
 	tokens domain.APITokenRepository,
 	transactions domain.RegistryTransactionManager,
 	outbox outbox.Writer,
 	artifactStore storage.ArtifactStore,
+	bufWorkflow BufWorkflow,
 	clock Clock,
 	ids IDGenerator,
 	tokenGenerator TokenGenerator,
@@ -47,10 +56,13 @@ func NewService(
 		modules:        modules,
 		versions:       versions,
 		artifacts:      artifacts,
+		bufConfigs:     bufConfigs,
+		metadata:       metadata,
 		tokens:         tokens,
 		transactions:   transactions,
 		outbox:         outbox,
 		artifactStore:  artifactStore,
+		bufWorkflow:    bufWorkflow,
 		clock:          clock,
 		ids:            ids,
 		tokenGenerator: tokenGenerator,
@@ -121,72 +133,135 @@ func (svc *Service) GetModule(ctx context.Context, nameValue string) (domain.Mod
 	return module, err
 }
 
-func (svc *Service) PublishModuleVersion(ctx context.Context, req PublishModuleVersionRequest) (domain.ModuleVersion, domain.Artifact, error) {
+func (svc *Service) PublishModuleVersion(ctx context.Context, req PublishModuleVersionRequest) (PublishModuleVersionResponse, error) {
 	name, err := domain.NewModuleName(req.ModuleName)
 	if err != nil {
-		return domain.ModuleVersion{}, domain.Artifact{}, ErrInvalidModuleName
+		return PublishModuleVersionResponse{}, ErrInvalidModuleName
 	}
 	versionValue, err := domain.NewVersion(req.Version)
 	if err != nil {
-		return domain.ModuleVersion{}, domain.Artifact{}, ErrInvalidVersion
+		return PublishModuleVersionResponse{}, ErrInvalidVersion
 	}
 	if req.Artifact == nil {
-		return domain.ModuleVersion{}, domain.Artifact{}, ErrStorageFailure
+		return PublishModuleVersionResponse{}, ErrStorageFailure
+	}
+	if svc.bufWorkflow == nil {
+		return PublishModuleVersionResponse{}, ErrBufWorkflowUnavailable
 	}
 
 	module, err := svc.modules.GetByName(ctx, name)
 	if errors.Is(err, domain.ErrNotFound) {
-		return domain.ModuleVersion{}, domain.Artifact{}, ErrModuleNotFound
+		return PublishModuleVersionResponse{}, ErrModuleNotFound
 	}
 	if err != nil {
-		return domain.ModuleVersion{}, domain.Artifact{}, err
+		return PublishModuleVersionResponse{}, err
 	}
 
 	if _, err := svc.versions.GetByModuleAndVersion(ctx, module.ID, versionValue); err == nil {
-		return domain.ModuleVersion{}, domain.Artifact{}, ErrModuleVersionAlreadyExists
+		return PublishModuleVersionResponse{}, ErrModuleVersionAlreadyExists
 	} else if err != nil && !errors.Is(err, domain.ErrNotFound) {
-		return domain.ModuleVersion{}, domain.Artifact{}, err
+		return PublishModuleVersionResponse{}, err
 	}
 
-	body, checksum, sizeBytes, err := svc.readArtifact(req.Artifact)
+	sourceBody, sourceChecksum, sourceSizeBytes, err := svc.readArtifact(req.Artifact)
 	if err != nil {
-		return domain.ModuleVersion{}, domain.Artifact{}, err
+		return PublishModuleVersionResponse{}, err
 	}
 
-	key := storage.BuildArtifactKey(name, versionValue, checksum)
-	object, err := svc.artifactStore.Put(ctx, key, bytes.NewReader(body), sizeBytes)
+	workdir, err := os.MkdirTemp("", "protoradar-publish-*")
 	if err != nil {
-		return domain.ModuleVersion{}, domain.Artifact{}, fmt.Errorf("%w: %v", ErrStorageFailure, err)
+		return PublishModuleVersionResponse{}, err
+	}
+	defer os.RemoveAll(workdir)
+
+	maxUncompressed := svc.options.MaxSourceUncompressedSizeBytes
+	if maxUncompressed <= 0 {
+		maxUncompressed = svc.options.MaxArtifactSizeBytes
+	}
+	if err := workspace.ExtractTarGzSafe(ctx, bytes.NewReader(sourceBody), workdir, workspace.ExtractOptions{MaxUncompressedSizeBytes: maxUncompressed}); err != nil {
+		return PublishModuleVersionResponse{}, fmt.Errorf("%w: %v", ErrUnsafeArchive, err)
+	}
+	if svc.options.BufRequireConfig {
+		if _, err := os.Stat(filepath.Join(workdir, "buf.yaml")); err != nil {
+			if os.IsNotExist(err) {
+				return PublishModuleVersionResponse{}, ErrBufConfigNotFound
+			}
+			return PublishModuleVersionResponse{}, err
+		}
+	}
+
+	bufResult, err := svc.bufWorkflow.Inspect(ctx, workdir, BufWorkflowOptions{
+		RequireBufYAML: svc.options.BufRequireConfig,
+		RunLint:        svc.options.BufLintMode != BufLintModeDisabled,
+	})
+	if err != nil {
+		return PublishModuleVersionResponse{}, mapBufWorkflowError(err, bufResult)
+	}
+	if len(bufResult.BufImage) == 0 {
+		return PublishModuleVersionResponse{}, ErrBufBuildFailed
+	}
+
+	bufImageChecksum, bufImageSizeBytes := checksumBytes(bufResult.BufImage)
+	sourceKey := storage.BuildSourceArchiveKey(name, versionValue, sourceChecksum)
+	bufImageKey := storage.BuildBufImageKey(name, versionValue, bufImageChecksum)
+
+	sourceObject, err := svc.artifactStore.Put(ctx, sourceKey, bytes.NewReader(sourceBody), sourceSizeBytes)
+	if err != nil {
+		return PublishModuleVersionResponse{}, fmt.Errorf("%w: %v", ErrStorageFailure, err)
+	}
+	bufImageObject, err := svc.artifactStore.Put(ctx, bufImageKey, bytes.NewReader(bufResult.BufImage), bufImageSizeBytes)
+	if err != nil {
+		_ = svc.artifactStore.Delete(ctx, sourceKey)
+		return PublishModuleVersionResponse{}, fmt.Errorf("%w: %v", ErrStorageFailure, err)
 	}
 
 	now := svc.clock.Now()
 	moduleVersionID, err := svc.ids.NewModuleVersionID()
 	if err != nil {
-		return domain.ModuleVersion{}, domain.Artifact{}, err
+		svc.cleanupUploadedArtifacts(ctx, sourceKey, bufImageKey)
+		return PublishModuleVersionResponse{}, err
 	}
-	artifactID, err := svc.ids.NewArtifactID()
+	sourceArtifactID, err := svc.ids.NewArtifactID()
 	if err != nil {
-		return domain.ModuleVersion{}, domain.Artifact{}, err
+		svc.cleanupUploadedArtifacts(ctx, sourceKey, bufImageKey)
+		return PublishModuleVersionResponse{}, err
 	}
+	bufImageArtifactID, err := svc.ids.NewArtifactID()
+	if err != nil {
+		svc.cleanupUploadedArtifacts(ctx, sourceKey, bufImageKey)
+		return PublishModuleVersionResponse{}, err
+	}
+
 	moduleVersion := domain.ModuleVersion{
 		ID:        moduleVersionID,
 		ModuleID:  module.ID,
 		Version:   versionValue,
 		Status:    domain.ModuleVersionStatusPublished,
-		Digest:    "sha256:" + checksum,
+		Digest:    bufResult.BufImageDigest,
 		CreatedAt: now,
 	}
 	publishedAt := now
 	moduleVersion.PublishedAt = &publishedAt
 
-	artifact := domain.Artifact{
-		ID:              artifactID,
+	sourceArtifact := domain.Artifact{
+		ID:              sourceArtifactID,
 		ModuleVersionID: moduleVersion.ID,
-		StorageKey:      object.Key,
-		ChecksumSHA256:  checksum,
-		SizeBytes:       object.SizeBytes,
+		Kind:            domain.ArtifactKindSourceArchive,
+		StorageKey:      sourceObject.Key,
+		ChecksumSHA256:  sourceChecksum,
+		SizeBytes:       sourceObject.SizeBytes,
 		CreatedAt:       now,
 	}
+	bufImageArtifact := domain.Artifact{
+		ID:              bufImageArtifactID,
+		ModuleVersionID: moduleVersion.ID,
+		Kind:            domain.ArtifactKindBufImage,
+		StorageKey:      bufImageObject.Key,
+		ChecksumSHA256:  bufImageChecksum,
+		SizeBytes:       bufImageObject.SizeBytes,
+		CreatedAt:       now,
+	}
+	metadataSummary := bufResult.DescriptorMetadata.Summary()
 
 	err = svc.transactions.WithinTransaction(ctx, func(txCtx context.Context) error {
 		if err := svc.versions.Create(txCtx, moduleVersion); err != nil {
@@ -195,14 +270,35 @@ func (svc *Service) PublishModuleVersion(ctx context.Context, req PublishModuleV
 			}
 			return err
 		}
-		if err := svc.artifacts.Create(txCtx, artifact); err != nil {
+		if err := svc.artifacts.Create(txCtx, sourceArtifact); err != nil {
 			if errors.Is(err, domain.ErrDuplicate) {
 				return ErrModuleVersionAlreadyExists
 			}
 			return err
 		}
+		if err := svc.artifacts.Create(txCtx, bufImageArtifact); err != nil {
+			if errors.Is(err, domain.ErrDuplicate) {
+				return ErrModuleVersionAlreadyExists
+			}
+			return err
+		}
+		if err := svc.bufConfigs.Save(txCtx, moduleVersion.ID, bufResult.ConfigInfo); err != nil {
+			return err
+		}
+		if err := svc.metadata.Save(txCtx, moduleVersion.ID, bufResult.DescriptorMetadata); err != nil {
+			return err
+		}
 
-		record, err := protoradarevents.NewModuleVersionPublished(module, moduleVersion, artifact, now)
+		record, err := protoradarevents.NewModuleVersionPublished(protoradarevents.ModuleVersionPublished{
+			Module:           module,
+			Version:          moduleVersion,
+			SourceArtifact:   sourceArtifact,
+			BufImageArtifact: bufImageArtifact,
+			BufConfig:        bufResult.ConfigInfo,
+			LintResult:       bufResult.LintResult,
+			MetadataSummary:  metadataSummary,
+			OccurredAt:       now,
+		})
 		if err != nil {
 			return err
 		}
@@ -215,11 +311,18 @@ func (svc *Service) PublishModuleVersion(ctx context.Context, req PublishModuleV
 		return nil
 	})
 	if err != nil {
-		_ = svc.artifactStore.Delete(ctx, key)
-		return domain.ModuleVersion{}, domain.Artifact{}, err
+		svc.cleanupUploadedArtifacts(ctx, sourceKey, bufImageKey)
+		return PublishModuleVersionResponse{}, err
 	}
 
-	return moduleVersion, artifact, nil
+	return PublishModuleVersionResponse{
+		Version:          moduleVersion,
+		SourceArtifact:   sourceArtifact,
+		BufImageArtifact: bufImageArtifact,
+		BufConfig:        bufResult.ConfigInfo,
+		LintResult:       bufResult.LintResult,
+		MetadataSummary:  metadataSummary,
+	}, nil
 }
 
 func (svc *Service) ListModuleVersions(ctx context.Context, moduleName string, limit int, offset int) ([]domain.ModuleVersion, error) {
@@ -247,12 +350,52 @@ func (svc *Service) GetModuleVersion(ctx context.Context, moduleName string, ver
 	return moduleVersion, err
 }
 
+func (svc *Service) GetModuleVersionDetails(ctx context.Context, moduleName string, versionValue string) (ModuleVersionDetailsResponse, error) {
+	moduleVersion, err := svc.GetModuleVersion(ctx, moduleName, versionValue)
+	if err != nil {
+		return ModuleVersionDetailsResponse{}, err
+	}
+
+	artifacts, err := svc.artifacts.ListByModuleVersion(ctx, moduleVersion.ID)
+	if err != nil && !errors.Is(err, domain.ErrNotFound) {
+		return ModuleVersionDetailsResponse{}, err
+	}
+	bufConfig, err := svc.bufConfigs.GetByModuleVersion(ctx, moduleVersion.ID)
+	if err != nil && !errors.Is(err, domain.ErrNotFound) {
+		return ModuleVersionDetailsResponse{}, err
+	}
+	metadataSummary, err := svc.metadata.GetSummaryByModuleVersion(ctx, moduleVersion.ID)
+	if err != nil && !errors.Is(err, domain.ErrNotFound) {
+		return ModuleVersionDetailsResponse{}, err
+	}
+
+	return ModuleVersionDetailsResponse{
+		Version:         moduleVersion,
+		Artifacts:       artifacts,
+		BufConfig:       bufConfig,
+		LintResult:      lintResultFromConfig(bufConfig),
+		MetadataSummary: metadataSummary,
+	}, nil
+}
+
+func (svc *Service) GetModuleVersionMetadata(ctx context.Context, moduleName string, versionValue string) (domain.DescriptorMetadata, error) {
+	moduleVersion, err := svc.GetModuleVersion(ctx, moduleName, versionValue)
+	if err != nil {
+		return domain.DescriptorMetadata{}, err
+	}
+	metadata, err := svc.metadata.GetByModuleVersion(ctx, moduleVersion.ID)
+	if errors.Is(err, domain.ErrNotFound) {
+		return domain.DescriptorMetadata{}, ErrModuleNotFound
+	}
+	return metadata, err
+}
+
 func (svc *Service) DownloadArtifact(ctx context.Context, moduleName string, versionValue string) (storage.ArtifactObject, domain.Artifact, error) {
 	moduleVersion, err := svc.GetModuleVersion(ctx, moduleName, versionValue)
 	if err != nil {
 		return storage.ArtifactObject{}, domain.Artifact{}, err
 	}
-	artifact, err := svc.artifacts.GetByModuleVersion(ctx, moduleVersion.ID)
+	artifact, err := svc.artifacts.GetByModuleVersionAndKind(ctx, moduleVersion.ID, domain.ArtifactKindSourceArchive)
 	if errors.Is(err, domain.ErrNotFound) {
 		return storage.ArtifactObject{}, domain.Artifact{}, ErrModuleNotFound
 	}
@@ -333,6 +476,37 @@ func (svc *Service) readArtifact(reader io.Reader) ([]byte, string, int64, error
 	}
 
 	return buffer.Bytes(), hex.EncodeToString(hasher.Sum(nil)), written, nil
+}
+
+func checksumBytes(body []byte) (string, int64) {
+	sum := sha256.Sum256(body)
+	return hex.EncodeToString(sum[:]), int64(len(body))
+}
+
+func mapBufWorkflowError(err error, result BufWorkflowResult) error {
+	if result.LintResult.Status == domain.BufLintStatusFailed {
+		return fmt.Errorf("%w: %v", ErrBufLintFailed, err)
+	}
+	if len(result.BufImage) > 0 {
+		return fmt.Errorf("%w: %v", ErrDescriptorExtractionFailed, err)
+	}
+	return fmt.Errorf("%w: %v", ErrBufBuildFailed, err)
+}
+
+func lintResultFromConfig(config domain.BufConfigInfo) domain.BufLintResult {
+	if !config.LintEnabled {
+		return domain.BufLintResult{Status: domain.BufLintStatusNotRun}
+	}
+	return domain.BufLintResult{Status: domain.BufLintStatusPassed}
+}
+
+func (svc *Service) cleanupUploadedArtifacts(ctx context.Context, keys ...string) {
+	for _, key := range keys {
+		if key == "" {
+			continue
+		}
+		_ = svc.artifactStore.Delete(ctx, key)
+	}
 }
 
 func (svc *Service) hashToken(rawToken string) string {

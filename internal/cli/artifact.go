@@ -30,6 +30,9 @@ func createArtifact(root string) (ArtifactPackage, error) {
 	if !info.IsDir() {
 		return ArtifactPackage{}, fmt.Errorf("%s is not a directory", root)
 	}
+	if err := requireRegularRootFile(root, "buf.yaml"); err != nil {
+		return ArtifactPackage{}, err
+	}
 
 	var body bytes.Buffer
 	gzipWriter := gzip.NewWriter(&body)
@@ -41,13 +44,19 @@ func createArtifact(root string) (ArtifactPackage, error) {
 			return walkErr
 		}
 		if entry.IsDir() {
+			if shouldSkipArchiveDir(entry.Name()) && path != root {
+				return filepath.SkipDir
+			}
 			return nil
+		}
+		if entry.Type()&fs.ModeSymlink != 0 {
+			return fmt.Errorf("unsafe symlink path %q", path)
 		}
 		info, err := entry.Info()
 		if err != nil {
 			return err
 		}
-		if !info.Mode().IsRegular() || filepath.Ext(path) != ".proto" {
+		if !info.Mode().IsRegular() {
 			return nil
 		}
 
@@ -57,7 +66,10 @@ func createArtifact(root string) (ArtifactPackage, error) {
 		}
 		name := filepath.ToSlash(rel)
 		if !safeArchivePath(name) {
-			return fmt.Errorf("unsafe proto path %q", name)
+			return fmt.Errorf("unsafe archive path %q", name)
+		}
+		if !shouldIncludeSourceFile(name) {
+			return nil
 		}
 
 		file, err := os.Open(path)
@@ -77,7 +89,9 @@ func createArtifact(root string) (ArtifactPackage, error) {
 		if _, err := io.Copy(tarWriter, file); err != nil {
 			return err
 		}
-		fileCount++
+		if filepath.Ext(name) == ".proto" {
+			fileCount++
+		}
 		return nil
 	})
 	if err != nil {
@@ -100,6 +114,37 @@ func createArtifact(root string) (ArtifactPackage, error) {
 		SizeBytes:      int64(body.Len()),
 		FileCount:      fileCount,
 	}, nil
+}
+
+func requireRegularRootFile(root string, name string) error {
+	path := filepath.Join(root, name)
+	info, err := os.Lstat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("%s is required at the root of --path", name)
+		}
+		return err
+	}
+	if info.Mode()&fs.ModeSymlink != 0 {
+		return fmt.Errorf("unsafe symlink path %q", path)
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("%s must be a regular file", name)
+	}
+	return nil
+}
+
+func shouldIncludeSourceFile(name string) bool {
+	return name == "buf.yaml" || name == "buf.lock" || filepath.Ext(name) == ".proto"
+}
+
+func shouldSkipArchiveDir(name string) bool {
+	switch name {
+	case ".git", "node_modules", "tmp", "dist", "build", "generated", "vendor":
+		return true
+	default:
+		return false
+	}
 }
 
 func extractArtifact(reader io.Reader, outputDir string, force bool) error {

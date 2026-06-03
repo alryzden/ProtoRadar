@@ -1,12 +1,16 @@
 package registry
 
 import (
+	"archive/tar"
 	"bytes"
+	"compress/gzip"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"slices"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -77,35 +81,38 @@ func TestPublishModuleVersionUploadsAndStoresMetadata(t *testing.T) {
 	fixture := newFixture()
 	module := fixture.addModule(t, "billing-api")
 
-	version, artifact, err := fixture.service.PublishModuleVersion(context.Background(), PublishModuleVersionRequest{
+	response, err := fixture.service.PublishModuleVersion(context.Background(), PublishModuleVersionRequest{
 		ModuleName: "billing-api",
 		Version:    "v1.0.0",
-		Artifact:   bytes.NewReader([]byte("proto artifact")),
+		Artifact:   bytes.NewReader(validSourceArchive(t)),
 	})
 	if err != nil {
 		t.Fatalf("publish version: %v", err)
 	}
 
-	if version.ModuleID != module.ID {
-		t.Fatalf("module id = %q", version.ModuleID)
+	if response.Version.ModuleID != module.ID {
+		t.Fatalf("module id = %q", response.Version.ModuleID)
 	}
-	if version.Version.String() != "v1.0.0" {
-		t.Fatalf("version = %q", version.Version)
+	if response.Version.Version.String() != "v1.0.0" {
+		t.Fatalf("version = %q", response.Version.Version)
 	}
-	if artifact.ModuleVersionID != version.ID {
-		t.Fatalf("artifact module version id = %q", artifact.ModuleVersionID)
+	if response.SourceArtifact.ModuleVersionID != response.Version.ID {
+		t.Fatalf("source artifact module version id = %q", response.SourceArtifact.ModuleVersionID)
 	}
-	if artifact.StorageKey != "modules/billing-api/versions/v1.0.0/sha256-1c62ce9153aadfb347569bc35c0f0a44ae7ad685a9616d5c7ce29230370b5e6e.tar.gz" {
-		t.Fatalf("storage key = %q", artifact.StorageKey)
+	if response.SourceArtifact.Kind != domain.ArtifactKindSourceArchive {
+		t.Fatalf("source artifact kind = %q", response.SourceArtifact.Kind)
 	}
-	if fixture.store.putKey != artifact.StorageKey {
-		t.Fatalf("uploaded key = %q", fixture.store.putKey)
+	if response.BufImageArtifact.Kind != domain.ArtifactKindBufImage {
+		t.Fatalf("buf image artifact kind = %q", response.BufImageArtifact.Kind)
+	}
+	if response.SourceArtifact.StorageKey == "" || response.BufImageArtifact.StorageKey == "" {
+		t.Fatalf("artifact keys should be set: %#v %#v", response.SourceArtifact, response.BufImageArtifact)
 	}
 	if len(fixture.versions.byModuleVersion) != 1 {
 		t.Fatalf("versions stored = %d", len(fixture.versions.byModuleVersion))
 	}
-	if len(fixture.artifacts.byVersion) != 1 {
-		t.Fatalf("artifacts stored = %d", len(fixture.artifacts.byVersion))
+	if len(fixture.artifacts.byVersionKind) != 2 {
+		t.Fatalf("artifacts stored = %d", len(fixture.artifacts.byVersionKind))
 	}
 }
 
@@ -113,10 +120,10 @@ func TestPublishModuleVersionWritesOutboxInMetadataTransaction(t *testing.T) {
 	fixture := newFixture()
 	fixture.addModule(t, "billing-api")
 
-	_, _, err := fixture.service.PublishModuleVersion(context.Background(), PublishModuleVersionRequest{
+	_, err := fixture.service.PublishModuleVersion(context.Background(), PublishModuleVersionRequest{
 		ModuleName: "billing-api",
 		Version:    "v1.0.0",
-		Artifact:   bytes.NewReader([]byte("proto artifact")),
+		Artifact:   bytes.NewReader(validSourceArchive(t)),
 	})
 	if err != nil {
 		t.Fatalf("publish version: %v", err)
@@ -132,7 +139,7 @@ func TestPublishModuleVersionWritesOutboxInMetadataTransaction(t *testing.T) {
 	if record.DedupKey != "module:module-1:version:v1.0.0:published" {
 		t.Fatalf("dedup key = %q", record.DedupKey)
 	}
-	if len(fixture.versions.byModuleVersion) != 1 || len(fixture.artifacts.byVersion) != 1 {
+	if len(fixture.versions.byModuleVersion) != 1 || len(fixture.artifacts.byVersionKind) != 2 {
 		t.Fatalf("metadata was not stored with outbox")
 	}
 }
@@ -140,10 +147,10 @@ func TestPublishModuleVersionWritesOutboxInMetadataTransaction(t *testing.T) {
 func TestPublishModuleVersionRejectsUnknownModule(t *testing.T) {
 	fixture := newFixture()
 
-	_, _, err := fixture.service.PublishModuleVersion(context.Background(), PublishModuleVersionRequest{
+	_, err := fixture.service.PublishModuleVersion(context.Background(), PublishModuleVersionRequest{
 		ModuleName: "billing-api",
 		Version:    "v1.0.0",
-		Artifact:   bytes.NewReader([]byte("proto artifact")),
+		Artifact:   bytes.NewReader(validSourceArchive(t)),
 	})
 	if !errors.Is(err, ErrModuleNotFound) {
 		t.Fatalf("error = %v, want ErrModuleNotFound", err)
@@ -157,13 +164,13 @@ func TestPublishModuleVersionRejectsDuplicateVersion(t *testing.T) {
 	req := PublishModuleVersionRequest{
 		ModuleName: "billing-api",
 		Version:    "v1.0.0",
-		Artifact:   bytes.NewReader([]byte("proto artifact")),
+		Artifact:   bytes.NewReader(validSourceArchive(t)),
 	}
-	if _, _, err := fixture.service.PublishModuleVersion(context.Background(), req); err != nil {
+	if _, err := fixture.service.PublishModuleVersion(context.Background(), req); err != nil {
 		t.Fatalf("publish version: %v", err)
 	}
-	req.Artifact = bytes.NewReader([]byte("proto artifact"))
-	_, _, err := fixture.service.PublishModuleVersion(context.Background(), req)
+	req.Artifact = bytes.NewReader(validSourceArchive(t))
+	_, err := fixture.service.PublishModuleVersion(context.Background(), req)
 	if !errors.Is(err, ErrModuleVersionAlreadyExists) {
 		t.Fatalf("error = %v, want ErrModuleVersionAlreadyExists", err)
 	}
@@ -174,7 +181,7 @@ func TestPublishModuleVersionRejectsArtifactLargerThanMaxSize(t *testing.T) {
 	fixture.service.options.MaxArtifactSizeBytes = 4
 	fixture.addModule(t, "billing-api")
 
-	_, _, err := fixture.service.PublishModuleVersion(context.Background(), PublishModuleVersionRequest{
+	_, err := fixture.service.PublishModuleVersion(context.Background(), PublishModuleVersionRequest{
 		ModuleName: "billing-api",
 		Version:    "v1.0.0",
 		Artifact:   bytes.NewReader([]byte("too large")),
@@ -192,32 +199,207 @@ func TestPublishModuleVersionCleansUpStorageWhenTransactionFailsAfterUpload(t *t
 	fixture.addModule(t, "billing-api")
 	fixture.outbox.createErr = errors.New("outbox failed")
 
-	_, _, err := fixture.service.PublishModuleVersion(context.Background(), PublishModuleVersionRequest{
+	_, err := fixture.service.PublishModuleVersion(context.Background(), PublishModuleVersionRequest{
 		ModuleName: "billing-api",
 		Version:    "v1.0.0",
-		Artifact:   bytes.NewReader([]byte("proto artifact")),
+		Artifact:   bytes.NewReader(validSourceArchive(t)),
 	})
 	if err == nil {
 		t.Fatalf("expected error")
 	}
-	if fixture.store.deletedKey != fixture.store.putKey {
-		t.Fatalf("deleted key = %q, want uploaded key %q", fixture.store.deletedKey, fixture.store.putKey)
+	if len(fixture.store.putKeys) != 2 {
+		t.Fatalf("put keys = %#v, want 2 uploads", fixture.store.putKeys)
+	}
+	if len(fixture.store.deletedKeys) != 2 {
+		t.Fatalf("deleted keys = %#v, want cleanup of both uploads", fixture.store.deletedKeys)
 	}
 	if len(fixture.versions.byModuleVersion) != 0 {
 		t.Fatalf("version metadata was not rolled back")
 	}
-	if len(fixture.artifacts.byVersion) != 0 {
+	if len(fixture.artifacts.byVersionKind) != 0 {
 		t.Fatalf("artifact metadata was not rolled back")
+	}
+	if len(fixture.bufConfigs.byVersion) != 0 {
+		t.Fatalf("buf config metadata was not rolled back")
+	}
+	if len(fixture.metadata.byVersion) != 0 {
+		t.Fatalf("descriptor metadata was not rolled back")
+	}
+}
+
+func TestPublishModuleVersionRejectsMissingBufYAMLWhenRequired(t *testing.T) {
+	fixture := newFixture()
+	fixture.addModule(t, "billing-api")
+
+	_, err := fixture.service.PublishModuleVersion(context.Background(), PublishModuleVersionRequest{
+		ModuleName: "billing-api",
+		Version:    "v1.0.0",
+		Artifact:   bytes.NewReader(sourceArchiveWithoutBufYAML(t)),
+	})
+	if !errors.Is(err, ErrBufConfigNotFound) {
+		t.Fatalf("error = %v, want ErrBufConfigNotFound", err)
+	}
+	if len(fixture.versions.byModuleVersion) != 0 || len(fixture.outbox.records) != 0 {
+		t.Fatalf("publish should not persist version or outbox")
+	}
+}
+
+func TestPublishModuleVersionRejectsBufBuildFailure(t *testing.T) {
+	fixture := newFixture()
+	fixture.addModule(t, "billing-api")
+	fixture.bufWorkflow.err = errors.New("build failed")
+	fixture.bufWorkflow.result = BufWorkflowResult{}
+
+	_, err := fixture.service.PublishModuleVersion(context.Background(), PublishModuleVersionRequest{
+		ModuleName: "billing-api",
+		Version:    "v1.0.0",
+		Artifact:   bytes.NewReader(validSourceArchive(t)),
+	})
+	if !errors.Is(err, ErrBufBuildFailed) {
+		t.Fatalf("error = %v, want ErrBufBuildFailed", err)
+	}
+	if len(fixture.versions.byModuleVersion) != 0 || len(fixture.outbox.records) != 0 {
+		t.Fatalf("publish should not persist version or outbox")
+	}
+}
+
+func TestPublishModuleVersionAllowsLintWarning(t *testing.T) {
+	fixture := newFixture()
+	fixture.addModule(t, "billing-api")
+	fixture.bufWorkflow.result.LintResult = domain.BufLintResult{Status: domain.BufLintStatusWarning, Report: "lint warning"}
+
+	response, err := fixture.service.PublishModuleVersion(context.Background(), PublishModuleVersionRequest{
+		ModuleName: "billing-api",
+		Version:    "v1.0.0",
+		Artifact:   bytes.NewReader(validSourceArchive(t)),
+	})
+	if err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+	if response.LintResult.Status != domain.BufLintStatusWarning || response.LintResult.Report != "lint warning" {
+		t.Fatalf("lint result = %#v", response.LintResult)
+	}
+	if len(fixture.versions.byModuleVersion) != 1 || len(fixture.outbox.records) != 1 {
+		t.Fatalf("publish should persist with lint warning")
+	}
+}
+
+func TestPublishModuleVersionRejectsLintFailureInEnforceMode(t *testing.T) {
+	fixture := newFixture()
+	fixture.addModule(t, "billing-api")
+	fixture.service.options.BufLintMode = BufLintModeEnforce
+	fixture.bufWorkflow.result.LintResult = domain.BufLintResult{Status: domain.BufLintStatusFailed, Report: "lint failed"}
+	fixture.bufWorkflow.err = errors.New("lint failed")
+
+	_, err := fixture.service.PublishModuleVersion(context.Background(), PublishModuleVersionRequest{
+		ModuleName: "billing-api",
+		Version:    "v1.0.0",
+		Artifact:   bytes.NewReader(validSourceArchive(t)),
+	})
+	if !errors.Is(err, ErrBufLintFailed) {
+		t.Fatalf("error = %v, want ErrBufLintFailed", err)
+	}
+	if len(fixture.versions.byModuleVersion) != 0 || len(fixture.outbox.records) != 0 {
+		t.Fatalf("publish should not persist version or outbox")
+	}
+}
+
+func TestPublishModuleVersionStoresDescriptorMetadataAndBufConfig(t *testing.T) {
+	fixture := newFixture()
+	fixture.addModule(t, "billing-api")
+
+	response, err := fixture.service.PublishModuleVersion(context.Background(), PublishModuleVersionRequest{
+		ModuleName: "billing-api",
+		Version:    "v1.0.0",
+		Artifact:   bytes.NewReader(validSourceArchive(t)),
+	})
+	if err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+	if _, exists := fixture.bufConfigs.byVersion[response.Version.ID.String()]; !exists {
+		t.Fatalf("buf config metadata was not saved")
+	}
+	metadata, exists := fixture.metadata.byVersion[response.Version.ID.String()]
+	if !exists {
+		t.Fatalf("descriptor metadata was not saved")
+	}
+	if response.MetadataSummary != metadata.Summary() {
+		t.Fatalf("metadata summary = %#v, want %#v", response.MetadataSummary, metadata.Summary())
+	}
+}
+
+func TestPublishModuleVersionUploadsSourceArchiveAndBufImage(t *testing.T) {
+	fixture := newFixture()
+	fixture.addModule(t, "billing-api")
+
+	response, err := fixture.service.PublishModuleVersion(context.Background(), PublishModuleVersionRequest{
+		ModuleName: "billing-api",
+		Version:    "v1.0.0",
+		Artifact:   bytes.NewReader(validSourceArchive(t)),
+	})
+	if err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+	if len(fixture.store.putKeys) != 2 {
+		t.Fatalf("put keys = %#v, want source and buf image", fixture.store.putKeys)
+	}
+	if !strings.Contains(response.SourceArtifact.StorageKey, "/source/sha256-") || !strings.HasSuffix(response.SourceArtifact.StorageKey, ".tar.gz") {
+		t.Fatalf("source key = %q", response.SourceArtifact.StorageKey)
+	}
+	if !strings.Contains(response.BufImageArtifact.StorageKey, "/buf-image/sha256-") || !strings.HasSuffix(response.BufImageArtifact.StorageKey, ".binpb") {
+		t.Fatalf("buf image key = %q", response.BufImageArtifact.StorageKey)
+	}
+}
+
+func TestPublishModuleVersionRejectsUnsafeArchive(t *testing.T) {
+	fixture := newFixture()
+	fixture.addModule(t, "billing-api")
+
+	_, err := fixture.service.PublishModuleVersion(context.Background(), PublishModuleVersionRequest{
+		ModuleName: "billing-api",
+		Version:    "v1.0.0",
+		Artifact:   bytes.NewReader(buildSourceArchive(t, map[string]string{"../evil.proto": "evil"})),
+	})
+	if !errors.Is(err, ErrUnsafeArchive) {
+		t.Fatalf("error = %v, want ErrUnsafeArchive", err)
+	}
+}
+
+func TestPublishModuleVersionEventDoesNotContainRawToken(t *testing.T) {
+	fixture := newFixture()
+	fixture.addModule(t, "billing-api")
+
+	if _, err := fixture.service.PublishModuleVersion(context.Background(), PublishModuleVersionRequest{
+		ModuleName: "billing-api",
+		Version:    "v1.0.0",
+		Artifact:   bytes.NewReader(validSourceArchive(t)),
+	}); err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+	if len(fixture.outbox.records) != 1 {
+		t.Fatalf("outbox records = %d", len(fixture.outbox.records))
+	}
+	payload := string(fixture.outbox.records[0].Payload)
+	if strings.Contains(payload, "raw-token") || strings.Contains(strings.ToLower(payload), "token") {
+		t.Fatalf("event payload contains token data: %s", payload)
+	}
+	var event map[string]any
+	if err := json.Unmarshal(fixture.outbox.records[0].Payload, &event); err != nil {
+		t.Fatalf("event payload json: %v", err)
+	}
+	if event["lint_status"] != string(domain.BufLintStatusPassed) {
+		t.Fatalf("lint_status = %#v", event["lint_status"])
 	}
 }
 
 func TestDownloadArtifactReturnsStreamAndMetadata(t *testing.T) {
 	fixture := newFixture()
 	fixture.addModule(t, "billing-api")
-	_, artifact, err := fixture.service.PublishModuleVersion(context.Background(), PublishModuleVersionRequest{
+	archive := validSourceArchive(t)
+	response, err := fixture.service.PublishModuleVersion(context.Background(), PublishModuleVersionRequest{
 		ModuleName: "billing-api",
 		Version:    "v1.0.0",
-		Artifact:   bytes.NewReader([]byte("proto artifact")),
+		Artifact:   bytes.NewReader(archive),
 	})
 	if err != nil {
 		t.Fatalf("publish version: %v", err)
@@ -229,15 +411,15 @@ func TestDownloadArtifactReturnsStreamAndMetadata(t *testing.T) {
 	}
 	defer object.Body.Close()
 
-	if gotArtifact.ID != artifact.ID {
-		t.Fatalf("artifact id = %q, want %q", gotArtifact.ID, artifact.ID)
+	if gotArtifact.ID != response.SourceArtifact.ID {
+		t.Fatalf("artifact id = %q, want %q", gotArtifact.ID, response.SourceArtifact.ID)
 	}
 	body, err := io.ReadAll(object.Body)
 	if err != nil {
 		t.Fatalf("read body: %v", err)
 	}
-	if string(body) != "proto artifact" {
-		t.Fatalf("body = %q", string(body))
+	if !bytes.Equal(body, archive) {
+		t.Fatalf("downloaded source archive did not match uploaded archive")
 	}
 }
 
@@ -303,10 +485,13 @@ type fixture struct {
 	modules        *fakeModules
 	versions       *fakeVersions
 	artifacts      *fakeArtifacts
+	bufConfigs     *fakeBufConfigs
+	metadata       *fakeMetadata
 	tokens         *fakeTokens
 	transactions   *fakeTransactions
 	outbox         *fakeOutbox
 	store          *fakeArtifactStore
+	bufWorkflow    *fakeBufWorkflow
 	clock          *fakeClock
 	ids            *fakeIDs
 	tokenGenerator *fakeTokenGenerator
@@ -316,18 +501,23 @@ func newFixture() *fixture {
 	modules := newFakeModules()
 	versions := newFakeVersions()
 	artifacts := newFakeArtifacts()
+	bufConfigs := newFakeBufConfigs()
+	metadata := newFakeMetadata()
 	tokens := newFakeTokens()
 	outboxWriter := &fakeOutbox{}
 	store := &fakeArtifactStore{objects: map[string][]byte{}}
+	bufWorkflow := &fakeBufWorkflow{result: successfulBufWorkflowResult()}
 	clock := &fakeClock{now: time.Date(2026, 6, 4, 12, 0, 0, 0, time.UTC)}
 	ids := &fakeIDs{}
 	tokenGenerator := &fakeTokenGenerator{next: "raw-token"}
 	transactions := &fakeTransactions{
-		modules:   modules,
-		versions:  versions,
-		artifacts: artifacts,
-		tokens:    tokens,
-		outbox:    outboxWriter,
+		modules:    modules,
+		versions:   versions,
+		artifacts:  artifacts,
+		bufConfigs: bufConfigs,
+		metadata:   metadata,
+		tokens:     tokens,
+		outbox:     outboxWriter,
 	}
 
 	return &fixture{
@@ -335,22 +525,28 @@ func newFixture() *fixture {
 			modules,
 			versions,
 			artifacts,
+			bufConfigs,
+			metadata,
 			tokens,
 			transactions,
 			outboxWriter,
 			store,
+			bufWorkflow,
 			clock,
 			ids,
 			tokenGenerator,
-			Options{MaxArtifactSizeBytes: 1024, TokenHashSecret: "hash-secret"},
+			Options{MaxArtifactSizeBytes: 4096, MaxSourceUncompressedSizeBytes: 4096, TokenHashSecret: "hash-secret", BufRequireConfig: true, BufLintMode: BufLintModeWarn},
 		),
 		modules:        modules,
 		versions:       versions,
 		artifacts:      artifacts,
+		bufConfigs:     bufConfigs,
+		metadata:       metadata,
 		tokens:         tokens,
 		transactions:   transactions,
 		outbox:         outboxWriter,
 		store:          store,
+		bufWorkflow:    bufWorkflow,
 		clock:          clock,
 		ids:            ids,
 		tokenGenerator: tokenGenerator,
@@ -429,17 +625,21 @@ func (generator *fakeTokenGenerator) NewToken() (string, error) {
 }
 
 type fakeTransactions struct {
-	modules   *fakeModules
-	versions  *fakeVersions
-	artifacts *fakeArtifacts
-	tokens    *fakeTokens
-	outbox    *fakeOutbox
+	modules    *fakeModules
+	versions   *fakeVersions
+	artifacts  *fakeArtifacts
+	bufConfigs *fakeBufConfigs
+	metadata   *fakeMetadata
+	tokens     *fakeTokens
+	outbox     *fakeOutbox
 }
 
 func (tx *fakeTransactions) WithinTransaction(ctx context.Context, fn func(ctx context.Context) error) error {
 	modules := tx.modules.snapshot()
 	versions := tx.versions.snapshot()
 	artifacts := tx.artifacts.snapshot()
+	bufConfigs := tx.bufConfigs.snapshot()
+	metadata := tx.metadata.snapshot()
 	tokens := tx.tokens.snapshot()
 	outboxRecords := slices.Clone(tx.outbox.records)
 
@@ -447,6 +647,8 @@ func (tx *fakeTransactions) WithinTransaction(ctx context.Context, fn func(ctx c
 		tx.modules.restore(modules)
 		tx.versions.restore(versions)
 		tx.artifacts.restore(artifacts)
+		tx.bufConfigs.restore(bufConfigs)
+		tx.metadata.restore(metadata)
 		tx.tokens.restore(tokens)
 		tx.outbox.records = outboxRecords
 		return err
@@ -597,23 +799,24 @@ func moduleVersionKey(moduleID domain.ModuleID, version domain.Version) string {
 }
 
 type fakeArtifacts struct {
-	byID      map[string]domain.Artifact
-	byVersion map[string]domain.Artifact
+	byID          map[string]domain.Artifact
+	byVersionKind map[string]domain.Artifact
 }
 
 func newFakeArtifacts() *fakeArtifacts {
 	return &fakeArtifacts{
-		byID:      map[string]domain.Artifact{},
-		byVersion: map[string]domain.Artifact{},
+		byID:          map[string]domain.Artifact{},
+		byVersionKind: map[string]domain.Artifact{},
 	}
 }
 
 func (repo *fakeArtifacts) Create(ctx context.Context, artifact domain.Artifact) error {
-	if _, exists := repo.byVersion[artifact.ModuleVersionID.String()]; exists {
+	key := artifactVersionKindKey(artifact.ModuleVersionID, artifact.Kind)
+	if _, exists := repo.byVersionKind[key]; exists {
 		return domain.ErrDuplicate
 	}
 	repo.byID[artifact.ID.String()] = artifact
-	repo.byVersion[artifact.ModuleVersionID.String()] = artifact
+	repo.byVersionKind[key] = artifact
 	return nil
 }
 
@@ -626,11 +829,25 @@ func (repo *fakeArtifacts) GetByID(ctx context.Context, id domain.ArtifactID) (d
 }
 
 func (repo *fakeArtifacts) GetByModuleVersion(ctx context.Context, moduleVersionID domain.ModuleVersionID) (domain.Artifact, error) {
-	artifact, exists := repo.byVersion[moduleVersionID.String()]
+	return repo.GetByModuleVersionAndKind(ctx, moduleVersionID, domain.ArtifactKindSourceArchive)
+}
+
+func (repo *fakeArtifacts) GetByModuleVersionAndKind(ctx context.Context, moduleVersionID domain.ModuleVersionID, kind domain.ArtifactKind) (domain.Artifact, error) {
+	artifact, exists := repo.byVersionKind[artifactVersionKindKey(moduleVersionID, kind)]
 	if !exists {
 		return domain.Artifact{}, domain.ErrNotFound
 	}
 	return artifact, nil
+}
+
+func (repo *fakeArtifacts) ListByModuleVersion(ctx context.Context, moduleVersionID domain.ModuleVersionID) ([]domain.Artifact, error) {
+	artifacts := make([]domain.Artifact, 0)
+	for _, artifact := range repo.byVersionKind {
+		if artifact.ModuleVersionID == moduleVersionID {
+			artifacts = append(artifacts, artifact)
+		}
+	}
+	return artifacts, nil
 }
 
 func (repo *fakeArtifacts) snapshot() *fakeArtifacts {
@@ -638,15 +855,99 @@ func (repo *fakeArtifacts) snapshot() *fakeArtifacts {
 	for key, value := range repo.byID {
 		copy.byID[key] = value
 	}
-	for key, value := range repo.byVersion {
-		copy.byVersion[key] = value
+	for key, value := range repo.byVersionKind {
+		copy.byVersionKind[key] = value
 	}
 	return copy
 }
 
 func (repo *fakeArtifacts) restore(snapshot *fakeArtifacts) {
 	repo.byID = snapshot.byID
+	repo.byVersionKind = snapshot.byVersionKind
+}
+
+func artifactVersionKindKey(moduleVersionID domain.ModuleVersionID, kind domain.ArtifactKind) string {
+	return moduleVersionID.String() + ":" + kind.String()
+}
+
+type fakeBufConfigs struct {
+	byVersion map[string]domain.BufConfigInfo
+}
+
+func newFakeBufConfigs() *fakeBufConfigs {
+	return &fakeBufConfigs{byVersion: map[string]domain.BufConfigInfo{}}
+}
+
+func (repo *fakeBufConfigs) Save(ctx context.Context, moduleVersionID domain.ModuleVersionID, config domain.BufConfigInfo) error {
+	repo.byVersion[moduleVersionID.String()] = config
+	return nil
+}
+
+func (repo *fakeBufConfigs) GetByModuleVersion(ctx context.Context, moduleVersionID domain.ModuleVersionID) (domain.BufConfigInfo, error) {
+	config, exists := repo.byVersion[moduleVersionID.String()]
+	if !exists {
+		return domain.BufConfigInfo{}, domain.ErrNotFound
+	}
+	return config, nil
+}
+
+func (repo *fakeBufConfigs) snapshot() *fakeBufConfigs {
+	copy := newFakeBufConfigs()
+	for key, value := range repo.byVersion {
+		copy.byVersion[key] = value
+	}
+	return copy
+}
+
+func (repo *fakeBufConfigs) restore(snapshot *fakeBufConfigs) {
 	repo.byVersion = snapshot.byVersion
+}
+
+type fakeMetadata struct {
+	byVersion map[string]domain.DescriptorMetadata
+	saveErr   error
+}
+
+func newFakeMetadata() *fakeMetadata {
+	return &fakeMetadata{byVersion: map[string]domain.DescriptorMetadata{}}
+}
+
+func (repo *fakeMetadata) Save(ctx context.Context, moduleVersionID domain.ModuleVersionID, metadata domain.DescriptorMetadata) error {
+	if repo.saveErr != nil {
+		return repo.saveErr
+	}
+	repo.byVersion[moduleVersionID.String()] = metadata
+	return nil
+}
+
+func (repo *fakeMetadata) GetByModuleVersion(ctx context.Context, moduleVersionID domain.ModuleVersionID) (domain.DescriptorMetadata, error) {
+	metadata, exists := repo.byVersion[moduleVersionID.String()]
+	if !exists {
+		return domain.DescriptorMetadata{}, domain.ErrNotFound
+	}
+	return metadata, nil
+}
+
+func (repo *fakeMetadata) GetSummaryByModuleVersion(ctx context.Context, moduleVersionID domain.ModuleVersionID) (domain.DescriptorMetadataSummary, error) {
+	metadata, err := repo.GetByModuleVersion(ctx, moduleVersionID)
+	if err != nil {
+		return domain.DescriptorMetadataSummary{}, err
+	}
+	return metadata.Summary(), nil
+}
+
+func (repo *fakeMetadata) snapshot() *fakeMetadata {
+	copy := newFakeMetadata()
+	copy.saveErr = repo.saveErr
+	for key, value := range repo.byVersion {
+		copy.byVersion[key] = value
+	}
+	return copy
+}
+
+func (repo *fakeMetadata) restore(snapshot *fakeMetadata) {
+	repo.byVersion = snapshot.byVersion
+	repo.saveErr = snapshot.saveErr
 }
 
 type fakeTokens struct {
@@ -734,9 +1035,11 @@ func (writer *fakeOutbox) Create(ctx context.Context, record outbox.Record) erro
 }
 
 type fakeArtifactStore struct {
-	objects    map[string][]byte
-	putKey     string
-	deletedKey string
+	objects     map[string][]byte
+	putKey      string
+	deletedKey  string
+	putKeys     []string
+	deletedKeys []string
 }
 
 func (store *fakeArtifactStore) Put(ctx context.Context, key string, body io.Reader, sizeBytes int64) (storage.ArtifactObject, error) {
@@ -745,6 +1048,7 @@ func (store *fakeArtifactStore) Put(ctx context.Context, key string, body io.Rea
 		return storage.ArtifactObject{}, err
 	}
 	store.putKey = key
+	store.putKeys = append(store.putKeys, key)
 	store.objects[key] = data
 	return storage.ArtifactObject{
 		Key:         key,
@@ -768,6 +1072,94 @@ func (store *fakeArtifactStore) Get(ctx context.Context, key string) (storage.Ar
 
 func (store *fakeArtifactStore) Delete(ctx context.Context, key string) error {
 	store.deletedKey = key
+	store.deletedKeys = append(store.deletedKeys, key)
 	delete(store.objects, key)
 	return nil
+}
+
+type fakeBufWorkflow struct {
+	result registryBufWorkflowResultAlias
+	err    error
+	calls  []bufWorkflowCall
+}
+
+type registryBufWorkflowResultAlias = BufWorkflowResult
+
+type bufWorkflowCall struct {
+	workdir string
+	options BufWorkflowOptions
+}
+
+func (workflow *fakeBufWorkflow) Inspect(ctx context.Context, workdir string, options BufWorkflowOptions) (BufWorkflowResult, error) {
+	workflow.calls = append(workflow.calls, bufWorkflowCall{workdir: workdir, options: options})
+	return workflow.result, workflow.err
+}
+
+func successfulBufWorkflowResult() BufWorkflowResult {
+	metadata := domain.DescriptorMetadata{Files: []domain.ProtoFile{
+		{
+			Path:        "user.proto",
+			PackageName: "user.v1",
+			Syntax:      "proto3",
+			Messages: []domain.ProtoMessage{
+				{
+					Name:     "User",
+					FullName: "user.v1.User",
+					Fields: []domain.ProtoField{
+						{Name: "id", Number: 1, Type: "TYPE_STRING", Label: "LABEL_OPTIONAL", JSONName: "id"},
+					},
+				},
+			},
+		},
+	}}
+	return BufWorkflowResult{
+		ConfigInfo: domain.BufConfigInfo{
+			BufYAMLPresent: true,
+			BufLockPresent: true,
+			BufYAMLDigest:  "sha256:buf-yaml",
+			BufLockDigest:  "sha256:buf-lock",
+			LintEnabled:    true,
+		},
+		BufImage:           []byte("buf image"),
+		BufImageDigest:     "sha256:buf-image",
+		LintResult:         domain.BufLintResult{Status: domain.BufLintStatusPassed},
+		DescriptorMetadata: metadata,
+	}
+}
+
+func validSourceArchive(t *testing.T) []byte {
+	t.Helper()
+	return buildSourceArchive(t, map[string]string{
+		"buf.yaml":   "version: v2\n",
+		"user.proto": "syntax = \"proto3\";",
+	})
+}
+
+func sourceArchiveWithoutBufYAML(t *testing.T) []byte {
+	t.Helper()
+	return buildSourceArchive(t, map[string]string{
+		"user.proto": "syntax = \"proto3\";",
+	})
+}
+
+func buildSourceArchive(t *testing.T, files map[string]string) []byte {
+	t.Helper()
+	var buffer bytes.Buffer
+	gzipWriter := gzip.NewWriter(&buffer)
+	tarWriter := tar.NewWriter(gzipWriter)
+	for name, body := range files {
+		if err := tarWriter.WriteHeader(&tar.Header{Name: name, Mode: 0o600, Size: int64(len(body))}); err != nil {
+			t.Fatalf("write tar header: %v", err)
+		}
+		if _, err := tarWriter.Write([]byte(body)); err != nil {
+			t.Fatalf("write tar body: %v", err)
+		}
+	}
+	if err := tarWriter.Close(); err != nil {
+		t.Fatalf("close tar: %v", err)
+	}
+	if err := gzipWriter.Close(); err != nil {
+		t.Fatalf("close gzip: %v", err)
+	}
+	return buffer.Bytes()
 }

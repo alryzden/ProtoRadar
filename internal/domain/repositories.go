@@ -26,6 +26,24 @@ type ArtifactRepository interface {
 	GetByModuleVersion(ctx context.Context, moduleVersionID ModuleVersionID) (Artifact, error)
 }
 
+type ModuleVersionArtifactRepository interface {
+	Create(ctx context.Context, artifact Artifact) error
+	GetByID(ctx context.Context, id ArtifactID) (Artifact, error)
+	GetByModuleVersionAndKind(ctx context.Context, moduleVersionID ModuleVersionID, kind ArtifactKind) (Artifact, error)
+	ListByModuleVersion(ctx context.Context, moduleVersionID ModuleVersionID) ([]Artifact, error)
+}
+
+type DescriptorMetadataRepository interface {
+	Save(ctx context.Context, moduleVersionID ModuleVersionID, metadata DescriptorMetadata) error
+	GetByModuleVersion(ctx context.Context, moduleVersionID ModuleVersionID) (DescriptorMetadata, error)
+	GetSummaryByModuleVersion(ctx context.Context, moduleVersionID ModuleVersionID) (DescriptorMetadataSummary, error)
+}
+
+type BufConfigRepository interface {
+	Save(ctx context.Context, moduleVersionID ModuleVersionID, config BufConfigInfo) error
+	GetByModuleVersion(ctx context.Context, moduleVersionID ModuleVersionID) (BufConfigInfo, error)
+}
+
 type APITokenRepository interface {
 	Create(ctx context.Context, token APIToken) error
 	GetByID(ctx context.Context, id APITokenID) (APIToken, error)
