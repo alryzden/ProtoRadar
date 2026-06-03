@@ -2,15 +2,11 @@ syntax = "proto3";
 
 package user.v1;
 
-message GetUserRequest {
-  string id = 1;
-}
-
 message User {
   string id = 1;
   string display_name = 2;
 }
 
 service UserService {
-  rpc GetUser(GetUserRequest) returns (User);
+  rpc GetUser(User) returns (User);
 }

@@ -1,20 +1,25 @@
-# Core Registry MVP
+# Core Registry
 
-The Core Registry MVP stores versioned protobuf modules. It is the foundation for later breaking-change checks, GitLab workflows, dependency analysis, and runtime inventory.
+The Core Registry stores versioned protobuf modules and their publish metadata. Phase 2 makes publish Buf-compatible: uploaded sources are validated server-side with Buf before the module version is persisted.
 
 ## What It Does
 
-Phase 1 provides:
+The registry provides:
 
 - versioned protobuf module storage;
 - PostgreSQL metadata persistence;
-- S3/MinIO artifact storage;
+- S3/MinIO object storage;
 - REST API endpoints;
 - CLI commands for publishing and pulling artifacts;
 - API token authentication;
-- transactional outbox records for outgoing domain events.
+- transactional outbox records for outgoing domain events;
+- Buf config metadata persistence;
+- descriptor metadata persistence.
 
-Published artifacts are tar.gz archives containing `.proto` files. The CLI creates these archives by walking the provided directory recursively and preserving paths relative to that directory.
+Published versions now store two artifact kinds:
+
+- `source_archive`: the uploaded tar.gz archive containing `buf.yaml`, optional `buf.lock`, and `.proto` files;
+- `buf_image`: the server-built binary descriptor image produced by Buf.
 
 ## REST Endpoints
 
@@ -27,6 +32,7 @@ GET  /api/v1/modules/{module}
 POST /api/v1/modules/{module}/versions
 GET  /api/v1/modules/{module}/versions
 GET  /api/v1/modules/{module}/versions/{version}
+GET  /api/v1/modules/{module}/versions/{version}/metadata
 GET  /api/v1/modules/{module}/versions/{version}/artifact
 ```
 
@@ -71,12 +77,12 @@ protoradar module create user-api \
   --repository-url "https://gitlab.example.com/platform/user-api"
 ```
 
-Publish a version:
+Publish a version from a Buf module root:
 
 ```sh
 protoradar push user-api \
-  --version v1.0.0 \
-  --path examples/user-api/proto
+  --version v1.1.0 \
+  --path examples/user-api
 ```
 
 List modules:
@@ -85,11 +91,19 @@ List modules:
 protoradar list
 ```
 
-Pull a version:
+View descriptor metadata:
+
+```sh
+curl -sS \
+  -H "Authorization: Bearer <token>" \
+  http://localhost:8080/api/v1/modules/user-api/versions/v1.1.0/metadata
+```
+
+Pull a source archive:
 
 ```sh
 protoradar pull user-api \
-  --version v1.0.0 \
+  --version v1.1.0 \
   --output ./tmp/user-api
 ```
 
@@ -97,15 +111,30 @@ If the output directory already exists and is not empty, use `--force`.
 
 ## Artifact Safety
 
-The CLI only includes `.proto` files in pushed artifacts. During pull, artifact extraction rejects absolute paths and traversal paths such as `../evil.proto`.
+The CLI packages only `buf.yaml`, optional `buf.lock`, and `.proto` files. It preserves relative paths and excludes local/build directories such as `.git`, `node_modules`, `tmp`, `dist`, `build`, `generated`, and `vendor`.
+
+On the server, source archive extraction rejects absolute paths, traversal paths such as `../evil.proto`, symlinks, hardlinks, non-regular entries, and archives that exceed the configured uncompressed size limit.
+
+## Descriptor Metadata
+
+The server extracts and persists descriptor metadata from the Buf image:
+
+- files and package names;
+- imports;
+- services and methods;
+- messages and fields;
+- enums and enum values;
+- summary counts.
+
+This metadata is intended for later breaking-change checks and dependency analysis.
 
 ## Transactional Outbox
 
 State-changing usecases write business data and outgoing event records in the same PostgreSQL transaction.
 
-Events written in Phase 1:
+Events currently written:
 
 - `ModuleCreated`
 - `ModuleVersionPublished`
 
-Usecases never publish directly to Kafka, Sarama, or another broker. Phase 1 persists outbox records only; publisher wiring is intentionally left for a later phase.
+`ModuleVersionPublished` is written after successful Buf build and inside the same transaction as version, artifact, Buf config, and descriptor metadata records. Usecases never publish directly to Kafka, Sarama, or another broker.

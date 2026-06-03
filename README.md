@@ -1,14 +1,18 @@
 # ProtoRadar
 
-ProtoRadar is a self-hosted protobuf governance platform. Phase 1 provides the Core Registry MVP: a REST API and CLI for storing versioned protobuf modules, persisting metadata in PostgreSQL, and storing tar.gz artifacts in S3-compatible object storage such as MinIO.
+ProtoRadar is a self-hosted protobuf governance platform. Phase 2 adds a Buf-compatible publish workflow on top of the Core Registry: publishing a module version validates uploaded protobuf sources with server-side Buf, stores both source and Buf image artifacts, extracts descriptor metadata, and emits a transactional outbox event for downstream processing.
 
-## Core Registry MVP
+## What It Does
 
-Phase 1 supports:
+ProtoRadar currently supports:
 
 - module creation and listing;
-- version publishing for protobuf artifacts;
-- artifact download;
+- Buf-compatible version publishing;
+- server-side `buf build`;
+- optional `buf lint` in `disabled`, `warn`, or `enforce` mode;
+- source archive and Buf image artifact storage;
+- descriptor metadata persistence for files, imports, services, methods, messages, fields, enums, and enum values;
+- descriptor metadata retrieval through REST;
 - API token authentication;
 - a `protoradar` CLI;
 - durable outgoing event records through a transactional outbox.
@@ -30,7 +34,7 @@ The compose stack starts:
 - MinIO on `localhost:9000`
 - MinIO console on `http://localhost:9001`
 
-The local bootstrap token is configured in `docker-compose.yml` as:
+The server image includes the Buf CLI for server-side validation. The local bootstrap token is configured in `docker-compose.yml` as:
 
 ```text
 local-bootstrap-token
@@ -62,12 +66,12 @@ protoradar module create user-api \
   --repository-url "https://gitlab.example.com/platform/user-api"
 ```
 
-Publish the example proto artifact:
+Publish the example Buf module:
 
 ```sh
 protoradar push user-api \
-  --version v1.0.0 \
-  --path examples/user-api/proto
+  --version v1.1.0 \
+  --path examples/user-api
 ```
 
 List modules:
@@ -76,13 +80,44 @@ List modules:
 protoradar list
 ```
 
-Pull the artifact:
+View descriptor metadata:
+
+```sh
+curl -sS \
+  -H "Authorization: Bearer <token>" \
+  http://localhost:8080/api/v1/modules/user-api/versions/v1.1.0/metadata
+```
+
+Pull the source archive:
 
 ```sh
 protoradar pull user-api \
-  --version v1.0.0 \
+  --version v1.1.0 \
   --output ./tmp/user-api
 ```
+
+## Buf-Compatible Workflow
+
+Publishing requires `buf.yaml` at the root of the path passed to `protoradar push`. If `buf.lock` is present, the CLI includes it and the server records its presence and digest.
+
+The server extracts the uploaded source archive safely, runs `buf build`, stores the resulting Buf image, optionally runs `buf lint`, extracts descriptor metadata, and persists all publish metadata transactionally.
+
+Lint modes:
+
+- `disabled`: skip lint;
+- `warn`: allow publish and return warning status/report;
+- `enforce`: reject publish when lint fails.
+
+Stored artifacts:
+
+- `source_archive`: uploaded tar.gz source archive;
+- `buf_image`: server-built binary descriptor image.
+
+Known limitations:
+
+- no breaking-change comparison yet;
+- no dependency graph UI yet;
+- no generated SDKs yet.
 
 ## Configuration
 
@@ -100,6 +135,12 @@ PROTORADAR_STORAGE_S3_USE_PATH_STYLE=true
 PROTORADAR_AUTH_TOKEN_HASH_SECRET=local-dev-token-hash-secret
 PROTORADAR_AUTH_BOOTSTRAP_TOKEN=local-bootstrap-token
 PROTORADAR_REGISTRY_MAX_ARTIFACT_SIZE_BYTES=104857600
+PROTORADAR_BUF_BINARY_PATH=buf
+PROTORADAR_BUF_BUILD_TIMEOUT=30s
+PROTORADAR_BUF_LINT_TIMEOUT=30s
+PROTORADAR_BUF_LINT_MODE=warn
+PROTORADAR_BUF_REQUIRE_CONFIG=true
+PROTORADAR_BUF_MAX_REPORT_BYTES=16384
 ```
 
 The CLI stores local credentials in:
@@ -123,14 +164,15 @@ The CLI stores the raw token locally because it must send it as a bearer token o
 
 ## Transactional Outbox
 
-Phase 1 writes these outgoing event records:
+Current outgoing event records:
 
 - `protoradar.module.created` for `ModuleCreated`
 - `protoradar.module_version.published` for `ModuleVersionPublished`
 
-The event payload DTOs live in `internal/integration/protoradarevents`. Usecases write `outbox.Record` values inside the same PostgreSQL transaction as module or version metadata changes. Kafka/Sarama routing and publishing are intentionally not wired in Phase 1.
+`ModuleVersionPublished` is written inside the same PostgreSQL transaction as version, artifact, Buf config, and descriptor metadata records. Kafka/Sarama routing and publishing remain outside usecases.
 
 ## More Documentation
 
+- [Buf Workflow](docs/buf-workflow.md)
 - [Core Registry](docs/core-registry.md)
 - [Development](docs/development.md)

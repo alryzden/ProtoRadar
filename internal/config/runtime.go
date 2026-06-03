@@ -1,11 +1,14 @@
 package config
 
+import "time"
+
 type RuntimeConfig struct {
 	Server   RuntimeServerConfig
 	Database RuntimeDatabaseConfig
 	Storage  RuntimeStorageConfig
 	Auth     RuntimeAuthConfig
 	Registry RuntimeRegistryConfig
+	Buf      RuntimeBufConfig
 }
 
 type RuntimeServerConfig struct {
@@ -36,4 +39,13 @@ type RuntimeAuthConfig struct {
 
 type RuntimeRegistryConfig struct {
 	MaxArtifactSizeBytes int64
+}
+
+type RuntimeBufConfig struct {
+	BinaryPath     string
+	BuildTimeout   time.Duration
+	LintTimeout    time.Duration
+	LintMode       string
+	RequireConfig  bool
+	MaxReportBytes int
 }

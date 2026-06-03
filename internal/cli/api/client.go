@@ -85,15 +85,46 @@ type ListModuleVersionsResponse struct {
 type Artifact struct {
 	ID              string    `json:"id"`
 	ModuleVersionID string    `json:"module_version_id"`
+	Kind            string    `json:"kind"`
 	StorageKey      string    `json:"storage_key"`
 	ChecksumSHA256  string    `json:"checksum_sha256"`
 	SizeBytes       int64     `json:"size_bytes"`
 	CreatedAt       time.Time `json:"created_at"`
 }
 
+type ArtifactSummary struct {
+	Kind           string `json:"kind"`
+	ChecksumSHA256 string `json:"checksum_sha256"`
+	SizeBytes      int64  `json:"size_bytes"`
+}
+
+type BufInfo struct {
+	ConfigPresent bool   `json:"config_present"`
+	LockPresent   bool   `json:"lock_present"`
+	LintStatus    string `json:"lint_status"`
+	LintReport    string `json:"lint_report,omitempty"`
+}
+
+type MetadataSummary struct {
+	Files      int `json:"files"`
+	Packages   int `json:"packages"`
+	Services   int `json:"services"`
+	Methods    int `json:"methods"`
+	Messages   int `json:"messages"`
+	Fields     int `json:"fields"`
+	Enums      int `json:"enums"`
+	EnumValues int `json:"enum_values"`
+}
+
 type PublishModuleVersionResponse struct {
-	Version  ModuleVersion `json:"version"`
-	Artifact Artifact      `json:"artifact"`
+	Module           string          `json:"module"`
+	Version          string          `json:"version"`
+	Status           string          `json:"status"`
+	SourceArtifact   ArtifactSummary `json:"source_artifact"`
+	BufImageArtifact ArtifactSummary `json:"buf_image_artifact"`
+	Buf              BufInfo         `json:"buf"`
+	MetadataSummary  MetadataSummary `json:"metadata_summary"`
+	CreatedAt        time.Time       `json:"created_at"`
 }
 
 type ArtifactDownload struct {

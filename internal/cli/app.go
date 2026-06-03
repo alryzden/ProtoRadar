@@ -188,15 +188,45 @@ func (app App) push(ctx context.Context, args []string) error {
 		return err
 	}
 
-	checksum := response.Artifact.ChecksumSHA256
+	checksum := response.SourceArtifact.ChecksumSHA256
 	if checksum == "" {
 		checksum = artifact.ChecksumSHA256
 	}
-	size := response.Artifact.SizeBytes
+	size := response.SourceArtifact.SizeBytes
 	if size == 0 {
 		size = artifact.SizeBytes
 	}
-	fmt.Fprintf(app.output(), "Published %s %s\nDigest: %s\nChecksum SHA-256: %s\nSize: %d bytes\n", flags.Arg(0), response.Version.Version, response.Version.Digest, checksum, size)
+	versionValue := response.Version
+	if versionValue == "" {
+		versionValue = *version
+	}
+	moduleName := response.Module
+	if moduleName == "" {
+		moduleName = flags.Arg(0)
+	}
+
+	fmt.Fprintf(app.output(), "Published %s %s\n", moduleName, versionValue)
+	fmt.Fprintf(app.output(), "Source checksum SHA-256: %s\n", checksum)
+	fmt.Fprintf(app.output(), "Source size: %d bytes\n", size)
+	if response.BufImageArtifact.ChecksumSHA256 != "" || response.BufImageArtifact.SizeBytes > 0 {
+		fmt.Fprintf(app.output(), "Buf image checksum SHA-256: %s\n", response.BufImageArtifact.ChecksumSHA256)
+		fmt.Fprintf(app.output(), "Buf image size: %d bytes\n", response.BufImageArtifact.SizeBytes)
+	}
+	if response.Buf.LintStatus != "" {
+		fmt.Fprintf(app.output(), "Lint status: %s\n", response.Buf.LintStatus)
+	}
+	if response.MetadataSummary.Files > 0 || response.MetadataSummary.Services > 0 || response.MetadataSummary.Messages > 0 || response.MetadataSummary.Enums > 0 {
+		fmt.Fprintf(app.output(), "Metadata: files=%d packages=%d services=%d methods=%d messages=%d fields=%d enums=%d enum_values=%d\n",
+			response.MetadataSummary.Files,
+			response.MetadataSummary.Packages,
+			response.MetadataSummary.Services,
+			response.MetadataSummary.Methods,
+			response.MetadataSummary.Messages,
+			response.MetadataSummary.Fields,
+			response.MetadataSummary.Enums,
+			response.MetadataSummary.EnumValues,
+		)
+	}
 	return nil
 }
 

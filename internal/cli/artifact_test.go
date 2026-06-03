@@ -12,8 +12,10 @@ import (
 	"testing"
 )
 
-func TestCreateArtifactIncludesOnlyProtoFiles(t *testing.T) {
+func TestCreateArtifactIncludesBufConfigLockAndProtoFiles(t *testing.T) {
 	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "buf.yaml"), "version: v2\n")
+	writeFile(t, filepath.Join(root, "buf.lock"), "deps: []\n")
 	writeFile(t, filepath.Join(root, "user.proto"), "syntax = \"proto3\";")
 	writeFile(t, filepath.Join(root, "README.md"), "docs")
 	writeFile(t, filepath.Join(root, "nested", "billing.proto"), "syntax = \"proto3\";")
@@ -24,6 +26,12 @@ func TestCreateArtifactIncludesOnlyProtoFiles(t *testing.T) {
 	}
 
 	names := archiveNames(t, artifact.Body)
+	if !slices.Contains(names, "buf.yaml") {
+		t.Fatalf("missing buf.yaml: %#v", names)
+	}
+	if !slices.Contains(names, "buf.lock") {
+		t.Fatalf("missing buf.lock: %#v", names)
+	}
 	if !slices.Contains(names, "user.proto") {
 		t.Fatalf("missing user.proto: %#v", names)
 	}
@@ -37,6 +45,7 @@ func TestCreateArtifactIncludesOnlyProtoFiles(t *testing.T) {
 
 func TestCreateArtifactPreservesRelativePaths(t *testing.T) {
 	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "buf.yaml"), "version: v2\n")
 	writeFile(t, filepath.Join(root, "a", "b", "service.proto"), "syntax = \"proto3\";")
 
 	artifact, err := createArtifact(root)
@@ -45,17 +54,62 @@ func TestCreateArtifactPreservesRelativePaths(t *testing.T) {
 	}
 
 	names := archiveNames(t, artifact.Body)
-	if len(names) != 1 || names[0] != "a/b/service.proto" {
+	if !slices.Contains(names, "a/b/service.proto") {
 		t.Fatalf("names = %#v", names)
+	}
+}
+
+func TestCreateArtifactRequiresBufYAML(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "user.proto"), "syntax = \"proto3\";")
+
+	_, err := createArtifact(root)
+	if err == nil || !strings.Contains(err.Error(), "buf.yaml") {
+		t.Fatalf("error = %v", err)
 	}
 }
 
 func TestCreateArtifactRejectsEmptyProtoDirectory(t *testing.T) {
 	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "buf.yaml"), "version: v2\n")
 	writeFile(t, filepath.Join(root, "README.md"), "docs")
 
 	_, err := createArtifact(root)
 	if err == nil || !strings.Contains(err.Error(), "no .proto") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestCreateArtifactExcludesIrrelevantDirectories(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "buf.yaml"), "version: v2\n")
+	writeFile(t, filepath.Join(root, "user.proto"), "syntax = \"proto3\";")
+	for _, dir := range []string{".git", "node_modules", "tmp", "dist", "build", "generated", "vendor"} {
+		writeFile(t, filepath.Join(root, dir, "ignored.proto"), "syntax = \"proto3\";")
+	}
+
+	artifact, err := createArtifact(root)
+	if err != nil {
+		t.Fatalf("create artifact: %v", err)
+	}
+	names := archiveNames(t, artifact.Body)
+	for _, name := range names {
+		if strings.Contains(name, "ignored.proto") {
+			t.Fatalf("included excluded directory file: %#v", names)
+		}
+	}
+}
+
+func TestCreateArtifactRejectsSymlink(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "buf.yaml"), "version: v2\n")
+	writeFile(t, filepath.Join(root, "user.proto"), "syntax = \"proto3\";")
+	if err := os.Symlink(filepath.Join(root, "user.proto"), filepath.Join(root, "link.proto")); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+
+	_, err := createArtifact(root)
+	if err == nil || !strings.Contains(err.Error(), "symlink") {
 		t.Fatalf("error = %v", err)
 	}
 }

@@ -64,25 +64,51 @@ func TestNewModuleVersionPublished(t *testing.T) {
 		t.Fatalf("version: %v", err)
 	}
 
-	record, err := NewModuleVersionPublished(
-		domain.Module{
+	record, err := NewModuleVersionPublished(ModuleVersionPublished{
+		Module: domain.Module{
 			ID:   domain.NewModuleID("module-1"),
 			Name: moduleName,
 		},
-		domain.ModuleVersion{
+		Version: domain.ModuleVersion{
 			ID:       domain.NewModuleVersionID("module-version-1"),
 			ModuleID: domain.NewModuleID("module-1"),
 			Version:  versionValue,
 			Digest:   "sha256:descriptor-digest",
 		},
-		domain.Artifact{
-			ID:              domain.NewArtifactID("artifact-1"),
+		SourceArtifact: domain.Artifact{
+			ID:              domain.NewArtifactID("source-artifact-1"),
 			ModuleVersionID: domain.NewModuleVersionID("module-version-1"),
-			ChecksumSHA256:  "artifact-checksum",
+			Kind:            domain.ArtifactKindSourceArchive,
+			ChecksumSHA256:  "source-checksum",
 			SizeBytes:       128,
 		},
-		occurredAt,
-	)
+		BufImageArtifact: domain.Artifact{
+			ID:              domain.NewArtifactID("buf-image-artifact-1"),
+			ModuleVersionID: domain.NewModuleVersionID("module-version-1"),
+			Kind:            domain.ArtifactKindBufImage,
+			ChecksumSHA256:  "buf-image-checksum",
+			SizeBytes:       256,
+		},
+		BufConfig: domain.BufConfigInfo{
+			BufYAMLPresent: true,
+			BufLockPresent: true,
+		},
+		LintResult: domain.BufLintResult{
+			Status: domain.BufLintStatusWarning,
+			Report: "lint warning text is intentionally not emitted",
+		},
+		MetadataSummary: domain.DescriptorMetadataSummary{
+			FileCount:      2,
+			ImportCount:    3,
+			ServiceCount:   4,
+			MethodCount:    5,
+			MessageCount:   6,
+			FieldCount:     7,
+			EnumCount:      8,
+			EnumValueCount: 9,
+		},
+		OccurredAt: occurredAt,
+	})
 	if err != nil {
 		t.Fatalf("event: %v", err)
 	}
@@ -113,16 +139,42 @@ func TestNewModuleVersionPublished(t *testing.T) {
 	if payload.Digest != "sha256:descriptor-digest" {
 		t.Fatalf("digest = %q", payload.Digest)
 	}
-	if payload.ArtifactChecksumSHA256 != "artifact-checksum" {
-		t.Fatalf("artifact_checksum_sha256 = %q", payload.ArtifactChecksumSHA256)
+	if payload.SourceArtifactChecksumSHA256 != "source-checksum" {
+		t.Fatalf("source_artifact_checksum_sha256 = %q", payload.SourceArtifactChecksumSHA256)
 	}
-	if payload.ArtifactSizeBytes != 128 {
-		t.Fatalf("artifact_size_bytes = %d", payload.ArtifactSizeBytes)
+	if payload.SourceArtifactSizeBytes != 128 {
+		t.Fatalf("source_artifact_size_bytes = %d", payload.SourceArtifactSizeBytes)
+	}
+	if payload.BufImageChecksumSHA256 != "buf-image-checksum" {
+		t.Fatalf("buf_image_checksum_sha256 = %q", payload.BufImageChecksumSHA256)
+	}
+	if payload.BufImageSizeBytes != 256 {
+		t.Fatalf("buf_image_size_bytes = %d", payload.BufImageSizeBytes)
+	}
+	if !payload.BufYAMLPresent {
+		t.Fatalf("buf_yaml_present should be true")
+	}
+	if !payload.BufLockPresent {
+		t.Fatalf("buf_lock_present should be true")
+	}
+	if payload.LintStatus != "warning" {
+		t.Fatalf("lint_status = %q", payload.LintStatus)
+	}
+	if payload.DescriptorSummary.FileCount != 2 || payload.DescriptorSummary.EnumValueCount != 9 {
+		t.Fatalf("descriptor_summary = %#v", payload.DescriptorSummary)
 	}
 	if !payload.OccurredAt.Equal(occurredAt) {
 		t.Fatalf("occurred_at = %s, want %s", payload.OccurredAt, occurredAt)
 	}
-	assertNoRawTokenOrInfrastructureDetails(t, string(record.Payload))
+
+	payloadText := string(record.Payload)
+	if strings.Contains(payloadText, "lint warning text") {
+		t.Fatalf("lint report should not be emitted in ModuleVersionPublished payload: %s", payloadText)
+	}
+	if !strings.Contains(payloadText, "\"file_count\":2") {
+		t.Fatalf("descriptor summary should use snake_case JSON fields: %s", payloadText)
+	}
+	assertNoRawTokenOrInfrastructureDetails(t, payloadText)
 	assertNoRawTokenOrInfrastructureDetails(t, record.EventType)
 	assertNoRawTokenOrInfrastructureDetails(t, record.DedupKey)
 }

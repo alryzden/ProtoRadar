@@ -11,27 +11,66 @@ import (
 
 const EventTypeModuleVersionPublished = "protoradar.module_version.published"
 
-type ModuleVersionPublishedPayload struct {
-	ModuleID               string    `json:"module_id"`
-	ModuleName             string    `json:"module_name"`
-	ModuleVersionID        string    `json:"module_version_id"`
-	Version                string    `json:"version"`
-	Digest                 string    `json:"digest"`
-	ArtifactChecksumSHA256 string    `json:"artifact_checksum_sha256"`
-	ArtifactSizeBytes      int64     `json:"artifact_size_bytes"`
-	OccurredAt             time.Time `json:"occurred_at"`
+type ModuleVersionPublished struct {
+	Module           domain.Module
+	Version          domain.ModuleVersion
+	SourceArtifact   domain.Artifact
+	BufImageArtifact domain.Artifact
+	BufConfig        domain.BufConfigInfo
+	LintResult       domain.BufLintResult
+	MetadataSummary  domain.DescriptorMetadataSummary
+	OccurredAt       time.Time
 }
 
-func NewModuleVersionPublished(module domain.Module, version domain.ModuleVersion, artifact domain.Artifact, occurredAt time.Time) (outbox.Record, error) {
+type ModuleVersionPublishedPayload struct {
+	ModuleID                     string                           `json:"module_id"`
+	ModuleName                   string                           `json:"module_name"`
+	ModuleVersionID              string                           `json:"module_version_id"`
+	Version                      string                           `json:"version"`
+	Digest                       string                           `json:"digest"`
+	SourceArtifactChecksumSHA256 string                           `json:"source_artifact_checksum_sha256"`
+	SourceArtifactSizeBytes      int64                            `json:"source_artifact_size_bytes"`
+	BufImageChecksumSHA256       string                           `json:"buf_image_checksum_sha256"`
+	BufImageSizeBytes            int64                            `json:"buf_image_size_bytes"`
+	BufYAMLPresent               bool                             `json:"buf_yaml_present"`
+	BufLockPresent               bool                             `json:"buf_lock_present"`
+	LintStatus                   string                           `json:"lint_status"`
+	DescriptorSummary            DescriptorMetadataSummaryPayload `json:"descriptor_summary"`
+	OccurredAt                   time.Time                        `json:"occurred_at"`
+}
+
+type DescriptorMetadataSummaryPayload struct {
+	FileCount      int `json:"file_count"`
+	ImportCount    int `json:"import_count"`
+	ServiceCount   int `json:"service_count"`
+	MethodCount    int `json:"method_count"`
+	MessageCount   int `json:"message_count"`
+	FieldCount     int `json:"field_count"`
+	EnumCount      int `json:"enum_count"`
+	EnumValueCount int `json:"enum_value_count"`
+}
+
+func NewModuleVersionPublished(event ModuleVersionPublished) (outbox.Record, error) {
+	lintStatus := event.LintResult.Status.String()
+	if lintStatus == "" {
+		lintStatus = domain.BufLintStatusNotRun.String()
+	}
+
 	payload := ModuleVersionPublishedPayload{
-		ModuleID:               module.ID.String(),
-		ModuleName:             module.Name.String(),
-		ModuleVersionID:        version.ID.String(),
-		Version:                version.Version.String(),
-		Digest:                 version.Digest,
-		ArtifactChecksumSHA256: artifact.ChecksumSHA256,
-		ArtifactSizeBytes:      artifact.SizeBytes,
-		OccurredAt:             occurredAt,
+		ModuleID:                     event.Module.ID.String(),
+		ModuleName:                   event.Module.Name.String(),
+		ModuleVersionID:              event.Version.ID.String(),
+		Version:                      event.Version.Version.String(),
+		Digest:                       event.Version.Digest,
+		SourceArtifactChecksumSHA256: event.SourceArtifact.ChecksumSHA256,
+		SourceArtifactSizeBytes:      event.SourceArtifact.SizeBytes,
+		BufImageChecksumSHA256:       event.BufImageArtifact.ChecksumSHA256,
+		BufImageSizeBytes:            event.BufImageArtifact.SizeBytes,
+		BufYAMLPresent:               event.BufConfig.BufYAMLPresent,
+		BufLockPresent:               event.BufConfig.BufLockPresent,
+		LintStatus:                   lintStatus,
+		DescriptorSummary:            descriptorMetadataSummaryPayload(event.MetadataSummary),
+		OccurredAt:                   event.OccurredAt,
 	}
 
 	body, err := json.Marshal(payload)
@@ -39,13 +78,26 @@ func NewModuleVersionPublished(module domain.Module, version domain.ModuleVersio
 		return outbox.Record{}, err
 	}
 
-	moduleID := module.ID.String()
+	moduleID := event.Module.ID.String()
 	return outbox.Record{
 		AggregateType: aggregateTypeModule,
 		AggregateID:   moduleID,
 		EventType:     EventTypeModuleVersionPublished,
-		DedupKey:      fmt.Sprintf("module:%s:version:%s:published", moduleID, version.Version.String()),
+		DedupKey:      fmt.Sprintf("module:%s:version:%s:published", moduleID, event.Version.Version.String()),
 		Payload:       body,
-		OccurredAt:    occurredAt,
+		OccurredAt:    event.OccurredAt,
 	}, nil
+}
+
+func descriptorMetadataSummaryPayload(summary domain.DescriptorMetadataSummary) DescriptorMetadataSummaryPayload {
+	return DescriptorMetadataSummaryPayload{
+		FileCount:      summary.FileCount,
+		ImportCount:    summary.ImportCount,
+		ServiceCount:   summary.ServiceCount,
+		MethodCount:    summary.MethodCount,
+		MessageCount:   summary.MessageCount,
+		FieldCount:     summary.FieldCount,
+		EnumCount:      summary.EnumCount,
+		EnumValueCount: summary.EnumValueCount,
+	}
 }

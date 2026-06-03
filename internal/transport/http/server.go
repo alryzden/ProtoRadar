@@ -20,9 +20,11 @@ type Registry interface {
 	CreateModule(ctx context.Context, req registry.CreateModuleRequest) (domain.Module, error)
 	ListModules(ctx context.Context, limit int, offset int) ([]domain.Module, error)
 	GetModule(ctx context.Context, name string) (domain.Module, error)
-	PublishModuleVersion(ctx context.Context, req registry.PublishModuleVersionRequest) (domain.ModuleVersion, domain.Artifact, error)
+	PublishModuleVersion(ctx context.Context, req registry.PublishModuleVersionRequest) (registry.PublishModuleVersionResponse, error)
 	ListModuleVersions(ctx context.Context, moduleName string, limit int, offset int) ([]domain.ModuleVersion, error)
 	GetModuleVersion(ctx context.Context, moduleName string, version string) (domain.ModuleVersion, error)
+	GetModuleVersionDetails(ctx context.Context, moduleName string, version string) (registry.ModuleVersionDetailsResponse, error)
+	GetModuleVersionMetadata(ctx context.Context, moduleName string, version string) (domain.DescriptorMetadata, error)
 	DownloadArtifact(ctx context.Context, moduleName string, version string) (storage.ArtifactObject, domain.Artifact, error)
 	CreateAPIToken(ctx context.Context, req registry.CreateAPITokenRequest) (registry.CreateAPITokenResponse, error)
 	AuthenticateToken(ctx context.Context, rawToken string) (registry.AuthSubject, error)
@@ -58,6 +60,7 @@ func (server *Server) Handler() http.Handler {
 	mux.Handle("POST /api/v1/modules/{module}/versions", server.requireBearer(http.HandlerFunc(server.publishModuleVersion)))
 	mux.Handle("GET /api/v1/modules/{module}/versions", server.requireBearer(http.HandlerFunc(server.listModuleVersions)))
 	mux.Handle("GET /api/v1/modules/{module}/versions/{version}", server.requireBearer(http.HandlerFunc(server.getModuleVersion)))
+	mux.Handle("GET /api/v1/modules/{module}/versions/{version}/metadata", server.requireBearer(http.HandlerFunc(server.getModuleVersionMetadata)))
 	mux.Handle("GET /api/v1/modules/{module}/versions/{version}/artifact", server.requireBearer(http.HandlerFunc(server.downloadArtifact)))
 	mux.Handle("POST /api/v1/tokens", server.requireBootstrapToken(http.HandlerFunc(server.createAPIToken)))
 
@@ -177,7 +180,7 @@ func (server *Server) publishModuleVersion(w http.ResponseWriter, r *http.Reques
 	}
 	defer file.Close()
 
-	moduleVersion, artifact, err := server.registry.PublishModuleVersion(r.Context(), registry.PublishModuleVersionRequest{
+	response, err := server.registry.PublishModuleVersion(r.Context(), registry.PublishModuleVersionRequest{
 		ModuleName: r.PathValue("module"),
 		Version:    version,
 		Artifact:   file,
@@ -188,8 +191,14 @@ func (server *Server) publishModuleVersion(w http.ResponseWriter, r *http.Reques
 	}
 
 	writeJSON(w, http.StatusCreated, publishModuleVersionResponse{
-		Version:  moduleVersionResponse(moduleVersion),
-		Artifact: artifactResponse(artifact),
+		Module:           r.PathValue("module"),
+		Version:          response.Version.Version.String(),
+		Status:           response.Version.Status.String(),
+		SourceArtifact:   artifactSummaryResponse(response.SourceArtifact),
+		BufImageArtifact: artifactSummaryResponse(response.BufImageArtifact),
+		Buf:              bufInfoResponse(response.BufConfig, response.LintResult),
+		MetadataSummary:  metadataSummaryResponse(response.MetadataSummary),
+		CreatedAt:        response.Version.CreatedAt,
 	})
 }
 
@@ -208,12 +217,21 @@ func (server *Server) listModuleVersions(w http.ResponseWriter, r *http.Request)
 }
 
 func (server *Server) getModuleVersion(w http.ResponseWriter, r *http.Request) {
-	version, err := server.registry.GetModuleVersion(r.Context(), r.PathValue("module"), r.PathValue("version"))
+	details, err := server.registry.GetModuleVersionDetails(r.Context(), r.PathValue("module"), r.PathValue("version"))
 	if err != nil {
 		writeUsecaseError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, moduleVersionResponse(version))
+	writeJSON(w, http.StatusOK, moduleVersionDetailsResponse(r.PathValue("module"), details))
+}
+
+func (server *Server) getModuleVersionMetadata(w http.ResponseWriter, r *http.Request) {
+	metadata, err := server.registry.GetModuleVersionMetadata(r.Context(), r.PathValue("module"), r.PathValue("version"))
+	if err != nil {
+		writeUsecaseError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, descriptorMetadataResponse(metadata))
 }
 
 func (server *Server) downloadArtifact(w http.ResponseWriter, r *http.Request) {
@@ -299,6 +317,16 @@ func writeUsecaseError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusConflict, "conflict")
 	case errors.Is(err, registry.ErrArtifactTooLarge):
 		writeError(w, http.StatusRequestEntityTooLarge, "artifact too large")
+	case errors.Is(err, registry.ErrUnsafeArchive):
+		writeError(w, http.StatusBadRequest, "unsafe archive")
+	case errors.Is(err, registry.ErrBufConfigNotFound):
+		writeError(w, http.StatusUnprocessableEntity, "buf config not found")
+	case errors.Is(err, registry.ErrBufBuildFailed):
+		writeError(w, http.StatusUnprocessableEntity, "buf build failed")
+	case errors.Is(err, registry.ErrBufLintFailed):
+		writeError(w, http.StatusUnprocessableEntity, "buf lint failed")
+	case errors.Is(err, registry.ErrDescriptorExtractionFailed):
+		writeError(w, http.StatusUnprocessableEntity, "descriptor extraction failed")
 	default:
 		writeError(w, http.StatusInternalServerError, "internal error")
 	}

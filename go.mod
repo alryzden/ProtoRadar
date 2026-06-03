@@ -5,6 +5,7 @@ go 1.26
 require (
 	github.com/jackc/pgx/v5 v5.7.2
 	github.com/minio/minio-go/v7 v7.2.0
+	google.golang.org/protobuf v1.36.10
 )
 
 require (
