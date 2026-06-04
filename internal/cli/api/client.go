@@ -127,6 +127,71 @@ type PublishModuleVersionResponse struct {
 	CreatedAt        time.Time       `json:"created_at"`
 }
 
+type BreakingChange struct {
+	Category    string `json:"category"`
+	FilePath    string `json:"file_path"`
+	PackageName string `json:"package_name"`
+	Symbol      string `json:"symbol"`
+	RuleID      string `json:"rule_id"`
+	Message     string `json:"message"`
+	Severity    string `json:"severity"`
+}
+
+type BreakingReport struct {
+	ID           string           `json:"id"`
+	Module       string           `json:"module"`
+	Against      string           `json:"against"`
+	TargetRef    string           `json:"target_ref"`
+	Status       string           `json:"status"`
+	ChangeCount  int              `json:"change_count"`
+	Changes      []BreakingChange `json:"changes"`
+	HumanSummary string           `json:"human_summary"`
+	CreatedAt    time.Time        `json:"created_at"`
+}
+
+type LinkModuleGitLabProjectRequest struct {
+	GitLabBaseURL     string `json:"gitlab_base_url"`
+	GitLabProjectID   int64  `json:"gitlab_project_id"`
+	GitLabProjectPath string `json:"gitlab_project_path"`
+}
+
+type ModuleGitLabProject struct {
+	Module            string    `json:"module"`
+	GitLabBaseURL     string    `json:"gitlab_base_url"`
+	GitLabProjectID   int64     `json:"gitlab_project_id"`
+	GitLabProjectPath string    `json:"gitlab_project_path"`
+	CreatedAt         time.Time `json:"created_at"`
+	UpdatedAt         time.Time `json:"updated_at"`
+}
+
+type DependencyModule struct {
+	Module            string   `json:"module"`
+	LatestVersion     string   `json:"latest_version"`
+	DependencySources []string `json:"dependency_sources"`
+	Reasons           []string `json:"reasons"`
+}
+
+type UnresolvedDependency struct {
+	Module           string `json:"module"`
+	Version          string `json:"version"`
+	Source           string `json:"source"`
+	ImportPath       string `json:"import_path"`
+	ReferencedSymbol string `json:"referenced_symbol"`
+	Reason           string `json:"reason"`
+}
+
+type ModuleDependencyGraph struct {
+	Module     string                 `json:"module"`
+	Upstream   []DependencyModule     `json:"upstream"`
+	Downstream []DependencyModule     `json:"downstream"`
+	Unresolved []UnresolvedDependency `json:"unresolved"`
+}
+
+type AffectedModules struct {
+	Module          string             `json:"module"`
+	AffectedModules []DependencyModule `json:"affected_modules"`
+}
+
 type ArtifactDownload struct {
 	Body           io.ReadCloser
 	ContentType    string
@@ -241,6 +306,86 @@ func (client *Client) PublishModuleVersion(ctx context.Context, module string, v
 	var response PublishModuleVersionResponse
 	if err := client.doJSON(req, &response); err != nil {
 		return PublishModuleVersionResponse{}, err
+	}
+	return response, nil
+}
+
+func (client *Client) CheckBreaking(ctx context.Context, module string, against string, targetRef string, artifactName string, artifact []byte) (BreakingReport, error) {
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	if err := writer.WriteField("against", against); err != nil {
+		return BreakingReport{}, err
+	}
+	if strings.TrimSpace(targetRef) != "" {
+		if err := writer.WriteField("target_ref", targetRef); err != nil {
+			return BreakingReport{}, err
+		}
+	}
+	part, err := writer.CreateFormFile("artifact", artifactName)
+	if err != nil {
+		return BreakingReport{}, err
+	}
+	if _, err := part.Write(artifact); err != nil {
+		return BreakingReport{}, err
+	}
+	if err := writer.Close(); err != nil {
+		return BreakingReport{}, err
+	}
+
+	req, err := client.newRequest(ctx, http.MethodPost, "/api/v1/modules/"+module+"/breaking-checks", &body)
+	if err != nil {
+		return BreakingReport{}, err
+	}
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+
+	var response BreakingReport
+	if err := client.doJSON(req, &response); err != nil {
+		return BreakingReport{}, err
+	}
+	return response, nil
+}
+
+func (client *Client) LinkModuleGitLabProject(ctx context.Context, module string, req LinkModuleGitLabProjectRequest) (ModuleGitLabProject, error) {
+	var body bytes.Buffer
+	if err := json.NewEncoder(&body).Encode(req); err != nil {
+		return ModuleGitLabProject{}, err
+	}
+
+	httpReq, err := client.newRequest(ctx, http.MethodPut, "/api/v1/modules/"+module+"/gitlab-project", &body)
+	if err != nil {
+		return ModuleGitLabProject{}, err
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+
+	var response ModuleGitLabProject
+	if err := client.doJSON(httpReq, &response); err != nil {
+		return ModuleGitLabProject{}, err
+	}
+	return response, nil
+}
+
+func (client *Client) GetModuleDependencies(ctx context.Context, module string) (ModuleDependencyGraph, error) {
+	req, err := client.newRequest(ctx, http.MethodGet, "/api/v1/modules/"+module+"/dependencies", nil)
+	if err != nil {
+		return ModuleDependencyGraph{}, err
+	}
+
+	var response ModuleDependencyGraph
+	if err := client.doJSON(req, &response); err != nil {
+		return ModuleDependencyGraph{}, err
+	}
+	return response, nil
+}
+
+func (client *Client) GetAffectedModules(ctx context.Context, module string) (AffectedModules, error) {
+	req, err := client.newRequest(ctx, http.MethodGet, "/api/v1/modules/"+module+"/affected", nil)
+	if err != nil {
+		return AffectedModules{}, err
+	}
+
+	var response AffectedModules
+	if err := client.doJSON(req, &response); err != nil {
+		return AffectedModules{}, err
 	}
 	return response, nil
 }

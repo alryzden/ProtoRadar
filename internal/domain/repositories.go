@@ -12,6 +12,12 @@ type ModuleRepository interface {
 	List(ctx context.Context, limit int, offset int) ([]Module, error)
 }
 
+type ModuleGitLabProjectRepository interface {
+	Upsert(ctx context.Context, mapping ModuleGitLabProject) error
+	GetByModuleID(ctx context.Context, moduleID ModuleID) (ModuleGitLabProject, error)
+	GetByGitLabProject(ctx context.Context, gitLabBaseURL string, gitLabProjectID int64) (ModuleGitLabProject, error)
+}
+
 type ModuleVersionRepository interface {
 	Create(ctx context.Context, version ModuleVersion) error
 	GetByID(ctx context.Context, id ModuleVersionID) (ModuleVersion, error)
@@ -39,9 +45,27 @@ type DescriptorMetadataRepository interface {
 	GetSummaryByModuleVersion(ctx context.Context, moduleVersionID ModuleVersionID) (DescriptorMetadataSummary, error)
 }
 
+type ModuleDependencyRepository interface {
+	ReplaceByConsumerModuleVersion(ctx context.Context, consumerModuleVersionID ModuleVersionID, dependencies []ModuleDependency, unresolved []UnresolvedProtoDependency) error
+	ListUpstreamByModule(ctx context.Context, moduleID ModuleID) ([]ModuleDependency, error)
+	ListUpstreamByModuleVersion(ctx context.Context, moduleVersionID ModuleVersionID) ([]ModuleDependency, error)
+	ListDownstreamByModule(ctx context.Context, moduleID ModuleID) ([]ModuleDependency, error)
+	ListAffectedModules(ctx context.Context, providerModuleID ModuleID) ([]AffectedModule, error)
+	ListUnresolvedByModule(ctx context.Context, moduleID ModuleID) ([]UnresolvedProtoDependency, error)
+	ListUnresolvedByModuleVersion(ctx context.Context, moduleVersionID ModuleVersionID) ([]UnresolvedProtoDependency, error)
+}
+
 type BufConfigRepository interface {
 	Save(ctx context.Context, moduleVersionID ModuleVersionID, config BufConfigInfo) error
 	GetByModuleVersion(ctx context.Context, moduleVersionID ModuleVersionID) (BufConfigInfo, error)
+}
+
+type BreakingReportRepository interface {
+	Create(ctx context.Context, report BreakingReport, changes []BreakingChange) error
+	GetByID(ctx context.Context, id BreakingReportID) (BreakingReport, []BreakingChange, error)
+	ListByModule(ctx context.Context, moduleID ModuleID, limit int, offset int) ([]BreakingReport, error)
+	CountChangesByReport(ctx context.Context, reportID BreakingReportID) (int, error)
+	ListChangesByReport(ctx context.Context, reportID BreakingReportID, limit int, offset int) ([]BreakingChange, error)
 }
 
 type APITokenRepository interface {

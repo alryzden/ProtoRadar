@@ -1,0 +1,59 @@
+{{template "header" .}}
+<section class="hero compact">
+  <div>
+    <p class="eyebrow">Read-only UI</p>
+    <h1>Modules</h1>
+    <p>{{.Message}}</p>
+  </div>
+  {{template "status_badge" .}}
+</section>
+<form class="toolbar" method="get" action="{{.BasePath}}/modules" aria-label="Module filters">
+  <label class="field">Search modules
+    <input type="search" name="q" value="{{.Query}}" placeholder="module, repository, description">
+  </label>
+  <button class="button secondary" type="submit">Filter</button>
+  {{if .Query}}<a class="button ghost" href="{{.BasePath}}/modules">Clear</a>{{end}}
+</form>
+{{if .Modules}}
+<section class="table-wrap" aria-label="Modules">
+  <table>
+    <thead>
+      <tr>
+        <th>Module</th>
+        <th>Description</th>
+        <th>Repository</th>
+        <th>GitLab</th>
+        <th>Latest</th>
+        <th>Versions</th>
+        <th>Last Updated</th>
+        <th>Reports</th>
+        <th>Last Status</th>
+        <th>Actions</th>
+      </tr>
+    </thead>
+    <tbody>
+      {{range .Modules}}
+      <tr>
+        <td><a class="strong-link" href="{{.ModuleURL}}">{{.Name}}</a></td>
+        <td>{{if .Description}}{{.Description}}{{else}}<span class="muted">No description</span>{{end}}</td>
+        <td>{{if .HasRepositoryURL}}<a href="{{.RepositoryURL}}" rel="noreferrer">Repository</a>{{else}}<span class="muted">None</span>{{end}}</td>
+        <td>{{if .HasGitLabProject}}<a href="{{.GitLabProjectURL}}" rel="noreferrer">{{.GitLabProjectLabel}}</a>{{else}}<span class="muted">None</span>{{end}}</td>
+        <td>{{if .HasLatestVersion}}<a class="code-inline" href="{{.LatestVersionURL}}">{{.LatestVersion}}</a>{{else}}<span class="muted">None</span>{{end}}</td>
+        <td>{{.VersionCount}}</td>
+        <td>{{if .LastPublishedOrSeen}}{{.LastPublishedOrSeen}}{{else}}<span class="muted">Unknown</span>{{end}}</td>
+        <td>{{.BreakingReportCount}}</td>
+        <td>{{if .HasLastBreaking}}<span class="{{badgeClass .LastBreakingStatus}}">{{badgeText .LastBreakingStatus}}</span>{{else}}<span class="badge badge-unknown">unknown</span>{{end}}</td>
+        <td class="actions">
+          <a href="{{.ModuleURL}}">View module</a>
+          {{if .HasLatestVersion}}<a href="{{.LatestVersionURL}}">Latest version</a>{{end}}
+          <a href="{{.FilteredReportsURL}}">Reports</a>
+        </td>
+      </tr>
+      {{end}}
+    </tbody>
+  </table>
+</section>
+{{else}}
+{{template "empty_state" .}}
+{{end}}
+{{template "footer" .}}

@@ -1,0 +1,23 @@
+syntax = "proto3";
+
+package billing.v1;
+
+import "user/v1/user.proto";
+
+message Invoice {
+  string id = 1;
+  user.v1.User account_owner = 2;
+  int64 amount_cents = 3;
+}
+
+message GetInvoicesRequest {
+  user.v1.User user = 1;
+}
+
+message GetInvoicesResponse {
+  repeated Invoice invoices = 1;
+}
+
+service BillingService {
+  rpc GetInvoices(GetInvoicesRequest) returns (GetInvoicesResponse);
+}

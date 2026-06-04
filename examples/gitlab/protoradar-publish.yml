@@ -1,0 +1,34 @@
+# Reusable ProtoRadar publish job for GitLab tag pipelines.
+# Override PROTORADAR_CLI_IMAGE until an official ProtoRadar CLI image is published.
+
+variables:
+  PROTORADAR_CLI_IMAGE: "ghcr.io/alryzden/protoradar-cli:latest"
+  PROTORADAR_PROTO_PATH: "."
+
+.protoradar-publish:
+  image: "$PROTORADAR_CLI_IMAGE"
+  rules:
+    - if: '$CI_COMMIT_TAG'
+  script:
+    - |
+      set -eu
+      if [ -z "${PROTORADAR_SERVER_URL:-}" ]; then
+        echo "PROTORADAR_SERVER_URL is required" >&2
+        exit 2
+      fi
+      if [ -z "${PROTORADAR_TOKEN:-}" ]; then
+        echo "PROTORADAR_TOKEN is required. Configure it as a masked GitLab CI/CD variable." >&2
+        exit 2
+      fi
+      if [ -z "${PROTORADAR_MODULE:-}" ]; then
+        echo "PROTORADAR_MODULE is required" >&2
+        exit 2
+      fi
+      publish_version="${PROTORADAR_PUBLISH_VERSION:-${CI_COMMIT_TAG:-}}"
+      if [ -z "${publish_version}" ]; then
+        echo "PROTORADAR_PUBLISH_VERSION or CI_COMMIT_TAG is required" >&2
+        exit 2
+      fi
+      protoradar push "${PROTORADAR_MODULE}" \
+        --version "${publish_version}" \
+        --path "${PROTORADAR_PROTO_PATH:-.}"

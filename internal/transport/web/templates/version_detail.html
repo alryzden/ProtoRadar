@@ -1,0 +1,73 @@
+{{template "header" .}}
+{{with .VersionView}}
+<nav class="breadcrumb" aria-label="Breadcrumb">
+  <a href="{{.ModulesURL}}">Modules</a>
+  <span>/</span>
+  <a href="{{.ModuleURL}}">{{.ModuleName}}</a>
+  <span>/</span>
+  <span>{{.Version}}</span>
+</nav>
+<section class="hero compact">
+  <div>
+    <p class="eyebrow">Version</p>
+    <h1>{{.ModuleName}} / <span class="code-inline">{{.Version}}</span></h1>
+    <p>Inspect artifacts, Buf configuration, descriptor metadata, and related breaking reports.</p>
+  </div>
+  <span class="{{badgeClass .Status}}">{{badgeText .Status}}</span>
+</section>
+<section class="grid three summary-grid">
+  <article class="card"><h2>Status</h2><p><span class="{{badgeClass .Status}}">{{badgeText .Status}}</span></p></article>
+  <article class="card"><h2>Created</h2><p>{{if .CreatedAt}}{{.CreatedAt}}{{else}}Unknown{{end}}</p></article>
+  <article class="card"><h2>Lint</h2><p>{{if .HasLintStatus}}<span class="{{badgeClass .LintStatus}}">{{badgeText .LintStatus}}</span>{{else}}<span class="muted">Not available</span>{{end}}</p></article>
+  <article class="card"><h2>Compile Status</h2><p><span class="{{badgeClass .CompileStatus}}">{{badgeText .CompileStatus}}</span></p></article>
+  <article class="card"><h2>Files</h2><p>{{.MetadataCounts.Files}}</p></article>
+  <article class="card"><h2>Schema Items</h2><p>{{.MetadataCounts.Services}} services · {{.MetadataCounts.Methods}} methods · {{.MetadataCounts.Messages}} messages · {{.MetadataCounts.Enums}} enums</p></article>
+</section>
+<section class="card">
+  <div class="section-heading"><div><p class="eyebrow">Artifacts</p><h2>Stored Artifacts</h2></div></div>
+  {{if .HasArtifacts}}
+  <div class="table-wrap embedded"><table><thead><tr><th>Kind</th><th>Digest</th><th>Size</th><th>Download</th></tr></thead><tbody>
+    {{range .Artifacts}}<tr><td><span class="code-inline">{{.Kind}}</span></td><td>{{if .HasChecksum}}<span class="digest" title="{{.ChecksumFull}}">{{.Checksum}}</span>{{else}}<span class="muted">None</span>{{end}}</td><td>{{.SizeBytes}} bytes</td><td>{{if .HasDownloadURL}}<a href="{{.DownloadURL}}">Download</a>{{else}}<span class="muted">Not available</span>{{end}}</td></tr>{{end}}
+  </tbody></table></div>
+  {{else}}<section class="empty-state compact"><div class="empty-icon" aria-hidden="true">AR</div><div><h2>No artifacts found for this version.</h2><p>Artifacts are created during publish.</p></div></section>{{end}}
+</section>
+<section class="card">
+  <div class="section-heading"><div><p class="eyebrow">Buf</p><h2>Buf Config Summary</h2></div></div>
+  <dl class="meta-list">
+    <div><dt>buf.yaml</dt><dd>{{.BufConfig.ConfigPresent}}</dd></div>
+    <div><dt>buf.lock</dt><dd>{{.BufConfig.LockPresent}}</dd></div>
+    <div><dt>Lint Enabled</dt><dd>{{.BufConfig.LintEnabled}}</dd></div>
+    <div><dt>Lint Status</dt><dd>{{if .BufConfig.HasLintStatus}}<span class="{{badgeClass .BufConfig.LintStatus}}">{{badgeText .BufConfig.LintStatus}}</span>{{else}}<span class="muted">Not available</span>{{end}}</dd></div>
+    <div><dt>Breaking Config</dt><dd>{{.BufConfig.BreakingConfigPresent}}</dd></div>
+    <div><dt>Module Paths</dt><dd>{{if .HasModulePaths}}{{range .BufConfig.ModulePaths}}<span class="code-inline">{{.}}</span> {{end}}{{else}}<span class="muted">None</span>{{end}}</dd></div>
+    <div><dt>Deps</dt><dd>{{if .HasDeps}}{{range .BufConfig.Deps}}<span class="code-inline">{{.}}</span> {{end}}{{else}}<span class="muted">None</span>{{end}}</dd></div>
+  </dl>
+</section>
+<section class="card">
+  <div class="section-heading"><div><p class="eyebrow">Descriptor</p><h2>Proto Files</h2></div></div>
+  {{if .HasMetadata}}
+  <div class="table-wrap embedded"><table><thead><tr><th>Path</th><th>Package</th><th>Syntax</th><th>Imports</th></tr></thead><tbody>{{range .ProtoFiles}}<tr><td><span class="code-inline">{{.Path}}</span></td><td>{{.PackageName}}</td><td>{{.Syntax}}</td><td>{{.ImportCount}}</td></tr>{{end}}</tbody></table></div>
+  {{else}}{{template "empty_state" $}}{{end}}
+</section>
+<section class="card">
+  <div class="section-heading"><div><p class="eyebrow">Descriptor</p><h2>Imports</h2></div></div>
+  {{if .Imports}}<div class="table-wrap embedded"><table><thead><tr><th>File</th><th>Import</th><th>Public</th><th>Weak</th></tr></thead><tbody>{{range .Imports}}<tr><td><span class="code-inline">{{.FilePath}}</span></td><td><span class="code-inline">{{.ImportPath}}</span></td><td>{{.Public}}</td><td>{{.Weak}}</td></tr>{{end}}</tbody></table></div>{{else}}<p class="muted">No imports recorded for this version.</p>{{end}}
+</section>
+<section class="card">
+  <div class="section-heading"><div><p class="eyebrow">Descriptor</p><h2>Services and Methods</h2></div></div>
+  {{if .Methods}}<div class="table-wrap embedded"><table><thead><tr><th>File</th><th>Service</th><th>Method</th><th>Input</th><th>Output</th><th>Client Stream</th><th>Server Stream</th></tr></thead><tbody>{{range .Methods}}<tr><td><span class="code-inline">{{.FilePath}}</span></td><td>{{.ServiceFullName}}</td><td>{{.Name}}</td><td><span class="code-inline">{{.InputType}}</span></td><td><span class="code-inline">{{.OutputType}}</span></td><td>{{.ClientStreaming}}</td><td>{{.ServerStreaming}}</td></tr>{{end}}</tbody></table></div>{{else}}<p class="muted">No services recorded for this version.</p>{{end}}
+</section>
+<section class="card">
+  <div class="section-heading"><div><p class="eyebrow">Descriptor</p><h2>Messages and Fields</h2></div></div>
+  {{if .Fields}}<div class="table-wrap embedded"><table><thead><tr><th>File</th><th>Message</th><th>No.</th><th>Field</th><th>Type</th><th>Type Name</th><th>Label</th><th>Repeated</th><th>Map</th></tr></thead><tbody>{{range .Fields}}<tr><td><span class="code-inline">{{.FilePath}}</span></td><td>{{.MessageFullName}}</td><td>{{.Number}}</td><td>{{.Name}}</td><td>{{.Type}}</td><td><span class="code-inline">{{.TypeName}}</span></td><td>{{.Label}}</td><td>{{.Repeated}}</td><td>{{.Map}}</td></tr>{{end}}</tbody></table></div>{{else}}<p class="muted">No message fields recorded for this version.</p>{{end}}
+</section>
+<section class="card">
+  <div class="section-heading"><div><p class="eyebrow">Descriptor</p><h2>Enums and Values</h2></div></div>
+  {{if .EnumValues}}<div class="table-wrap embedded"><table><thead><tr><th>File</th><th>Enum</th><th>Value</th><th>Number</th></tr></thead><tbody>{{range .EnumValues}}<tr><td><span class="code-inline">{{.FilePath}}</span></td><td>{{.EnumFullName}}</td><td>{{.Name}}</td><td>{{.Number}}</td></tr>{{end}}</tbody></table></div>{{else}}<p class="muted">No enum values recorded for this version.</p>{{end}}
+</section>
+<section class="card">
+  <div class="section-heading"><div><p class="eyebrow">Compatibility</p><h2>Related Breaking Reports</h2></div></div>
+  {{if .HasRelatedReports}}<div class="table-wrap embedded"><table><thead><tr><th>Report</th><th>Target Ref</th><th>Status</th><th>Changes</th><th>Created</th></tr></thead><tbody>{{range .RelatedReports}}<tr><td><a href="{{.ReportURL}}">{{.ID}}</a></td><td><span class="code-inline">{{.TargetRef}}</span></td><td><span class="{{badgeClass .Status}}">{{badgeText .Status}}</span></td><td>{{.ChangeCount}}</td><td>{{.CreatedAt}}</td></tr>{{end}}</tbody></table></div>{{else}}<section class="empty-state compact"><div class="empty-icon" aria-hidden="true">BR</div><div><h2>No breaking reports for this version yet.</h2><p>Reports will appear here when this version is used as a baseline.</p></div></section>{{end}}
+</section>
+{{end}}
+{{template "footer" .}}

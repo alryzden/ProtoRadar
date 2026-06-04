@@ -1,0 +1,110 @@
+{{template "header" .}}
+{{with .ModuleView}}
+<section class="hero compact">
+  <div>
+    <p class="eyebrow">Module</p>
+    <h1>{{.Name}}</h1>
+    <p>{{if .Description}}{{.Description}}{{else}}No description provided.{{end}}</p>
+    <dl class="meta-list">
+      {{if .HasRepositoryURL}}<div><dt>Repository</dt><dd><a href="{{.RepositoryURL}}" rel="noreferrer">{{.RepositoryURL}}</a></dd></div>{{end}}
+      {{if .HasGitLabProject}}<div><dt>GitLab Project</dt><dd><a href="{{.GitLabProjectURL}}" rel="noreferrer">{{.GitLabProjectLabel}}</a></dd></div>{{end}}
+      {{if .HasLatestVersion}}<div><dt>Latest Version</dt><dd><span class="code-inline">{{.LatestVersion}}</span></dd></div>{{end}}
+      <div><dt>Created</dt><dd>{{if .CreatedAt}}{{.CreatedAt}}{{else}}Unknown{{end}}</dd></div>
+      <div><dt>Updated</dt><dd>{{if .UpdatedAt}}{{.UpdatedAt}}{{else}}Unknown{{end}}</dd></div>
+    </dl>
+  </div>
+  {{if .HasLatestVersion}}<span class="badge badge-published">published</span>{{else}}<span class="badge badge-unknown">unknown</span>{{end}}
+</section>
+<section class="card">
+  <div class="section-heading">
+    <div>
+      <p class="eyebrow">Dependencies</p>
+      <h2>Dependency Graph</h2>
+    </div>
+    <a class="button secondary" href="{{.DependencyGraphURL}}">Open dependency graph</a>
+  </div>
+  <p class="muted">Review downstream consumers, upstream dependencies, and unresolved protobuf references for this module.</p>
+</section>
+<section class="card">
+  <div class="section-heading">
+    <div>
+      <p class="eyebrow">Versions</p>
+      <h2>Published Versions</h2>
+    </div>
+  </div>
+  {{if .Versions}}
+  <div class="table-wrap embedded">
+    <table>
+      <thead>
+        <tr>
+          <th>Version</th>
+          <th>Status</th>
+          <th>Created</th>
+          <th>Source Digest</th>
+          <th>Buf Image Digest</th>
+          <th>Lint</th>
+          <th>Metadata</th>
+          <th>Action</th>
+        </tr>
+      </thead>
+      <tbody>
+        {{range .Versions}}
+        <tr>
+          <td><a class="code-inline" href="{{.VersionURL}}">{{.Version}}</a></td>
+          <td><span class="{{badgeClass .Status}}">{{badgeText .Status}}</span></td>
+          <td>{{if .CreatedAt}}{{.CreatedAt}}{{else}}<span class="muted">Unknown</span>{{end}}</td>
+          <td>{{if .HasSourceDigest}}<span class="digest" title="{{.SourceDigestFull}}">{{.SourceDigest}}</span>{{else}}<span class="muted">None</span>{{end}}</td>
+          <td>{{if .HasBufImageDigest}}<span class="digest" title="{{.BufImageDigestFull}}">{{.BufImageDigest}}</span>{{else}}<span class="muted">None</span>{{end}}</td>
+          <td>{{if .HasLintStatus}}<span class="{{badgeClass .LintStatus}}">{{badgeText .LintStatus}}</span>{{else}}<span class="muted">Not run</span>{{end}}</td>
+          <td>{{.Files}} files · {{.Services}} svc · {{.Methods}} rpc · {{.Messages}} msg · {{.Enums}} enum</td>
+          <td><a href="{{.VersionURL}}">View version</a></td>
+        </tr>
+        {{end}}
+      </tbody>
+    </table>
+  </div>
+  {{else}}
+  {{template "empty_state" $}}
+  {{end}}
+</section>
+<section class="card">
+  <div class="section-heading">
+    <div>
+      <p class="eyebrow">Compatibility</p>
+      <h2>Recent Breaking Reports</h2>
+    </div>
+    <a class="button secondary" href="{{.FilteredReportsURL}}">All module reports</a>
+  </div>
+  {{if .RecentReports}}
+  <div class="table-wrap embedded">
+    <table>
+      <thead>
+        <tr>
+          <th>Created</th>
+          <th>Base Version</th>
+          <th>Target Ref</th>
+          <th>Status</th>
+          <th>Changes</th>
+          <th>Action</th>
+        </tr>
+      </thead>
+      <tbody>
+        {{range .RecentReports}}
+        <tr>
+          <td>{{if .CreatedAt}}{{.CreatedAt}}{{else}}<span class="muted">Unknown</span>{{end}}</td>
+          <td><span class="code-inline">{{.BaseVersion}}</span></td>
+          <td>{{if .TargetRef}}<span class="code-inline">{{.TargetRef}}</span>{{else}}<span class="muted">None</span>{{end}}</td>
+          <td><span class="{{badgeClass .Status}}">{{badgeText .Status}}</span></td>
+          <td>{{.ChangeCount}}</td>
+          <td><a href="{{.ReportURL}}">View report</a></td>
+        </tr>
+        {{end}}
+      </tbody>
+    </table>
+  </div>
+  {{else}}
+  <section class="empty-state compact"><div class="empty-icon" aria-hidden="true">BR</div><div><h2>No recent breaking reports.</h2><p>Run a breaking check to populate this section.</p></div></section>
+  {{end}}
+</section>
+{{end}}
+{{template "footer" .}}

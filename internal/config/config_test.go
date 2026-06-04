@@ -40,6 +40,24 @@ func TestDefaults(t *testing.T) {
 	if cfg.Buf.MaxReportBytes != defaultBufMaxReportBytes {
 		t.Fatalf("buf max report bytes = %d", cfg.Buf.MaxReportBytes)
 	}
+	if cfg.Breaking.MaxReportBytes != defaultBreakingMaxReportBytes {
+		t.Fatalf("breaking max report bytes = %d", cfg.Breaking.MaxReportBytes)
+	}
+	if cfg.Breaking.MaxChanges != defaultBreakingMaxChanges {
+		t.Fatalf("breaking max changes = %d", cfg.Breaking.MaxChanges)
+	}
+	if cfg.Breaking.DefaultAgainst != "latest" {
+		t.Fatalf("breaking default against = %q", cfg.Breaking.DefaultAgainst)
+	}
+	if !cfg.UI.Enabled {
+		t.Fatalf("ui enabled should default true")
+	}
+	if cfg.UI.BasePath != "/ui" {
+		t.Fatalf("ui base path = %q", cfg.UI.BasePath)
+	}
+	if cfg.UI.StaticPath != "/ui/static" {
+		t.Fatalf("ui static path = %q", cfg.UI.StaticPath)
+	}
 }
 
 func TestValidateFailuresAreDeterministic(t *testing.T) {
@@ -117,6 +135,47 @@ func TestValidateFailuresAreDeterministic(t *testing.T) {
 	}
 
 	cfg.Buf.MaxReportBytes = 1
+	cfg.Breaking.MaxReportBytes = 0
+	want = "breaking.max_report_bytes must be positive"
+	if err := cfg.Validate(); err == nil || err.Error() != want {
+		t.Fatalf("error = %v, want %q", err, want)
+	}
+
+	cfg.Breaking.MaxReportBytes = 1
+	cfg.Breaking.MaxChanges = 0
+	want = "breaking.max_changes must be positive"
+	if err := cfg.Validate(); err == nil || err.Error() != want {
+		t.Fatalf("error = %v, want %q", err, want)
+	}
+
+	cfg.Breaking.MaxChanges = 1
+	cfg.Breaking.DefaultAgainst = " "
+	want = "breaking.default_against is required"
+	if err := cfg.Validate(); err == nil || err.Error() != want {
+		t.Fatalf("error = %v, want %q", err, want)
+	}
+
+	cfg.Breaking.DefaultAgainst = "latest"
+	cfg.UI.BasePath = "ui"
+	want = "ui.base_path must start with /"
+	if err := cfg.Validate(); err == nil || err.Error() != want {
+		t.Fatalf("error = %v, want %q", err, want)
+	}
+
+	cfg.UI.BasePath = "/ui"
+	cfg.UI.StaticPath = "ui/static"
+	want = "ui.static_path must start with /"
+	if err := cfg.Validate(); err == nil || err.Error() != want {
+		t.Fatalf("error = %v, want %q", err, want)
+	}
+
+	cfg.UI.StaticPath = "/assets"
+	want = "ui.static_path must be under ui.base_path"
+	if err := cfg.Validate(); err == nil || err.Error() != want {
+		t.Fatalf("error = %v, want %q", err, want)
+	}
+
+	cfg.UI.StaticPath = "/ui/static"
 	want = "database.url is required"
 	if err := cfg.Validate(); err == nil || err.Error() != want {
 		t.Fatalf("error = %v, want %q", err, want)
@@ -142,6 +201,12 @@ func TestRuntimeMapping(t *testing.T) {
 	cfg.Buf.LintMode = BufLintModeEnforce
 	cfg.Buf.RequireConfig = false
 	cfg.Buf.MaxReportBytes = 4096
+	cfg.Breaking.MaxReportBytes = 32768
+	cfg.Breaking.MaxChanges = 777
+	cfg.Breaking.DefaultAgainst = "v1.0.0"
+	cfg.UI.Enabled = false
+	cfg.UI.BasePath = "/console/"
+	cfg.UI.StaticPath = "/console/assets/"
 
 	runtime, err := cfg.Runtime()
 	if err != nil {
@@ -190,6 +255,24 @@ func TestRuntimeMapping(t *testing.T) {
 	if runtime.Buf.MaxReportBytes != 4096 {
 		t.Fatalf("buf max report bytes = %d", runtime.Buf.MaxReportBytes)
 	}
+	if runtime.Breaking.MaxReportBytes != 32768 {
+		t.Fatalf("breaking max report bytes = %d", runtime.Breaking.MaxReportBytes)
+	}
+	if runtime.Breaking.MaxChanges != 777 {
+		t.Fatalf("breaking max changes = %d", runtime.Breaking.MaxChanges)
+	}
+	if runtime.Breaking.DefaultAgainst != "v1.0.0" {
+		t.Fatalf("breaking default against = %q", runtime.Breaking.DefaultAgainst)
+	}
+	if runtime.UI.Enabled {
+		t.Fatalf("ui enabled should be false")
+	}
+	if runtime.UI.BasePath != "/console" {
+		t.Fatalf("ui base path = %q", runtime.UI.BasePath)
+	}
+	if runtime.UI.StaticPath != "/console/assets" {
+		t.Fatalf("ui static path = %q", runtime.UI.StaticPath)
+	}
 }
 
 func TestLoadFileAndEnvOverrides(t *testing.T) {
@@ -217,6 +300,14 @@ buf:
   lint_mode: disabled
   require_config: false
   max_report_bytes: 8192
+breaking:
+  max_report_bytes: 32768
+  max_changes: 200
+  default_against: v1.0.0
+ui:
+  enabled: false
+  base_path: /console
+  static_path: /console/assets
 database:
   url: postgres://postgres:postgres@localhost:5432/protoradar
 `))
@@ -235,6 +326,12 @@ database:
 	t.Setenv("PROTORADAR_BUF_LINT_MODE", "enforce")
 	t.Setenv("PROTORADAR_BUF_REQUIRE_CONFIG", "true")
 	t.Setenv("PROTORADAR_BUF_MAX_REPORT_BYTES", "12345")
+	t.Setenv("PROTORADAR_BREAKING_MAX_REPORT_BYTES", "54321")
+	t.Setenv("PROTORADAR_BREAKING_MAX_CHANGES", "321")
+	t.Setenv("PROTORADAR_BREAKING_DEFAULT_AGAINST", "latest")
+	t.Setenv("PROTORADAR_UI_ENABLED", "true")
+	t.Setenv("PROTORADAR_UI_BASE_PATH", "/ui")
+	t.Setenv("PROTORADAR_UI_STATIC_PATH", "/ui/static")
 	t.Setenv("PROTORADAR_DATABASE_URL", "postgres://env")
 
 	cfg, err := LoadFile(file.Name())
@@ -268,6 +365,24 @@ database:
 	}
 	if cfg.Buf.MaxReportBytes != 12345 {
 		t.Fatalf("buf max report bytes = %d", cfg.Buf.MaxReportBytes)
+	}
+	if cfg.Breaking.MaxReportBytes != 54321 {
+		t.Fatalf("breaking max report bytes = %d", cfg.Breaking.MaxReportBytes)
+	}
+	if cfg.Breaking.MaxChanges != 321 {
+		t.Fatalf("breaking max changes = %d", cfg.Breaking.MaxChanges)
+	}
+	if cfg.Breaking.DefaultAgainst != "latest" {
+		t.Fatalf("breaking default against = %q", cfg.Breaking.DefaultAgainst)
+	}
+	if !cfg.UI.Enabled {
+		t.Fatalf("ui enabled should be true")
+	}
+	if cfg.UI.BasePath != "/ui" {
+		t.Fatalf("ui base path = %q", cfg.UI.BasePath)
+	}
+	if cfg.UI.StaticPath != "/ui/static" {
+		t.Fatalf("ui static path = %q", cfg.UI.StaticPath)
 	}
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("validate: %v", err)
@@ -314,6 +429,97 @@ func TestBufValidationFailures(t *testing.T) {
 				cfg.Buf.MaxReportBytes = 0
 			},
 			want: "buf.max_report_bytes must be positive",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := validConfig()
+			tt.edit(&cfg)
+
+			if err := cfg.Validate(); err == nil || err.Error() != tt.want {
+				t.Fatalf("error = %v, want %q", err, tt.want)
+			}
+		})
+	}
+}
+
+func TestBreakingValidationFailures(t *testing.T) {
+	tests := []struct {
+		name string
+		edit func(*Config)
+		want string
+	}{
+		{
+			name: "non-positive max report bytes",
+			edit: func(cfg *Config) {
+				cfg.Breaking.MaxReportBytes = 0
+			},
+			want: "breaking.max_report_bytes must be positive",
+		},
+		{
+			name: "non-positive max changes",
+			edit: func(cfg *Config) {
+				cfg.Breaking.MaxChanges = 0
+			},
+			want: "breaking.max_changes must be positive",
+		},
+		{
+			name: "missing default against",
+			edit: func(cfg *Config) {
+				cfg.Breaking.DefaultAgainst = " "
+			},
+			want: "breaking.default_against is required",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := validConfig()
+			tt.edit(&cfg)
+
+			if err := cfg.Validate(); err == nil || err.Error() != tt.want {
+				t.Fatalf("error = %v, want %q", err, tt.want)
+			}
+		})
+	}
+}
+
+func TestUIValidationFailures(t *testing.T) {
+	tests := []struct {
+		name string
+		edit func(*Config)
+		want string
+	}{
+		{
+			name: "base path must be absolute",
+			edit: func(cfg *Config) {
+				cfg.UI.BasePath = "ui"
+			},
+			want: "ui.base_path must start with /",
+		},
+		{
+			name: "static path must be absolute",
+			edit: func(cfg *Config) {
+				cfg.UI.StaticPath = "ui/static"
+			},
+			want: "ui.static_path must start with /",
+		},
+		{
+			name: "static path must be under base path",
+			edit: func(cfg *Config) {
+				cfg.UI.BasePath = "/ui"
+				cfg.UI.StaticPath = "/assets"
+			},
+			want: "ui.static_path must be under ui.base_path",
+		},
+		{
+			name: "static path must not equal base path",
+			edit: func(cfg *Config) {
+				cfg.UI.BasePath = "/ui"
+				cfg.UI.StaticPath = "/ui"
+			},
+			want: "ui.static_path must be under ui.base_path",
 		},
 	}
 

@@ -1,0 +1,13 @@
+include:
+  - local: examples/gitlab/protoradar-mr-check.yml
+  - local: examples/gitlab/protoradar-publish.yml
+
+stages:
+  - validate
+  - publish
+
+# protoradar:mr-check is provided by protoradar-mr-check.yml and runs in merge request pipelines.
+
+protoradar:publish:
+  extends: .protoradar-publish
+  stage: publish

@@ -1,0 +1,17 @@
+include:
+  - project: platform/protoradar
+    ref: v0.5.0
+    file:
+      - /examples/gitlab/protoradar-mr-check.yml
+
+stages:
+  - validate
+
+variables:
+  PROTORADAR_SERVER_URL: "https://protoradar.example.com"
+  PROTORADAR_MODULE: "user-api"
+  PROTORADAR_PROTO_PATH: "."
+  PROTORADAR_AGAINST: "latest"
+  # Override this until your organization publishes a ProtoRadar CLI image.
+  PROTORADAR_CLI_IMAGE: "registry.example.com/platform/protoradar-cli:latest"
+  # Configure PROTORADAR_TOKEN and PROTORADAR_GITLAB_TOKEN as masked GitLab CI/CD variables.

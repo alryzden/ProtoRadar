@@ -179,6 +179,150 @@ func TestNewModuleVersionPublished(t *testing.T) {
 	assertNoRawTokenOrInfrastructureDetails(t, record.DedupKey)
 }
 
+func TestNewBreakingReportCreated(t *testing.T) {
+	createdAt := time.Date(2026, 6, 4, 11, 0, 0, 0, time.UTC)
+	moduleName, err := domain.NewModuleName("user-api")
+	if err != nil {
+		t.Fatalf("module name: %v", err)
+	}
+	version, err := domain.NewVersion("v1.0.0")
+	if err != nil {
+		t.Fatalf("version: %v", err)
+	}
+
+	record, err := NewBreakingReportCreated(domain.BreakingReport{
+		ID:            domain.NewBreakingReportID("report-1"),
+		ModuleID:      domain.NewModuleID("module-1"),
+		ModuleName:    moduleName,
+		BaseVersionID: domain.NewModuleVersionID("module-version-1"),
+		BaseVersion:   version,
+		TargetRef:     "local",
+		Status:        domain.BreakingReportStatusBreaking,
+		ChangeCount:   2,
+		RawOutput:     "uploaded archive bytes and raw token should not be emitted",
+		HumanSummary:  "summary should not be emitted",
+		CreatedAt:     createdAt,
+	})
+	if err != nil {
+		t.Fatalf("event: %v", err)
+	}
+
+	if record.EventType != EventTypeBreakingReportCreated {
+		t.Fatalf("event type = %q, want %q", record.EventType, EventTypeBreakingReportCreated)
+	}
+	if record.DedupKey != "breaking-report:report-1:created" {
+		t.Fatalf("dedup key = %q", record.DedupKey)
+	}
+	if record.AggregateType != aggregateTypeModule || record.AggregateID != "module-1" {
+		t.Fatalf("aggregate = %s/%s", record.AggregateType, record.AggregateID)
+	}
+
+	var payload BreakingReportCreatedPayload
+	if err := json.Unmarshal(record.Payload, &payload); err != nil {
+		t.Fatalf("payload json: %v", err)
+	}
+	if payload.ReportID != "report-1" {
+		t.Fatalf("report_id = %q", payload.ReportID)
+	}
+	if payload.ModuleID != "module-1" {
+		t.Fatalf("module_id = %q", payload.ModuleID)
+	}
+	if payload.ModuleName != "user-api" {
+		t.Fatalf("module_name = %q", payload.ModuleName)
+	}
+	if payload.BaseVersionID != "module-version-1" {
+		t.Fatalf("base_version_id = %q", payload.BaseVersionID)
+	}
+	if payload.BaseVersion != "v1.0.0" {
+		t.Fatalf("base_version = %q", payload.BaseVersion)
+	}
+	if payload.TargetRef != "local" {
+		t.Fatalf("target_ref = %q", payload.TargetRef)
+	}
+	if payload.Status != "breaking" {
+		t.Fatalf("status = %q", payload.Status)
+	}
+	if payload.ChangeCount != 2 {
+		t.Fatalf("change_count = %d", payload.ChangeCount)
+	}
+	if !payload.CreatedAt.Equal(createdAt) {
+		t.Fatalf("created_at = %s, want %s", payload.CreatedAt, createdAt)
+	}
+
+	payloadText := string(record.Payload)
+	for _, forbidden := range []string{"raw token", "uploaded archive", "archive bytes", "summary should not be emitted"} {
+		if strings.Contains(payloadText, forbidden) {
+			t.Fatalf("payload contains forbidden content %q: %s", forbidden, payloadText)
+		}
+	}
+	assertNoRawTokenOrInfrastructureDetails(t, payloadText)
+	assertNoRawTokenOrInfrastructureDetails(t, record.EventType)
+	assertNoRawTokenOrInfrastructureDetails(t, record.DedupKey)
+}
+
+func TestNewModuleGitLabProjectLinked(t *testing.T) {
+	occurredAt := time.Date(2026, 6, 4, 12, 0, 0, 0, time.UTC)
+	moduleName, err := domain.NewModuleName("user-api")
+	if err != nil {
+		t.Fatalf("module name: %v", err)
+	}
+
+	record, err := NewModuleGitLabProjectLinked(domain.ModuleGitLabProject{
+		ID:                domain.NewModuleGitLabProjectID("mapping-1"),
+		ModuleID:          domain.NewModuleID("module-1"),
+		ModuleName:        moduleName,
+		GitLabBaseURL:     "https://gitlab.example.com/",
+		GitLabProjectID:   123,
+		GitLabProjectPath: "platform/user-api",
+	}, occurredAt)
+	if err != nil {
+		t.Fatalf("event: %v", err)
+	}
+
+	if record.EventType != EventTypeModuleGitLabProjectLinked {
+		t.Fatalf("event type = %q, want %q", record.EventType, EventTypeModuleGitLabProjectLinked)
+	}
+	if record.DedupKey != "module:module-1:gitlab-project:https://gitlab.example.com:123:linked" {
+		t.Fatalf("dedup key = %q", record.DedupKey)
+	}
+	if record.AggregateType != aggregateTypeModule || record.AggregateID != "module-1" {
+		t.Fatalf("aggregate = %s/%s", record.AggregateType, record.AggregateID)
+	}
+
+	var payload ModuleGitLabProjectLinkedPayload
+	if err := json.Unmarshal(record.Payload, &payload); err != nil {
+		t.Fatalf("payload json: %v", err)
+	}
+	if payload.ModuleID != "module-1" {
+		t.Fatalf("module_id = %q", payload.ModuleID)
+	}
+	if payload.ModuleName != "user-api" {
+		t.Fatalf("module_name = %q", payload.ModuleName)
+	}
+	if payload.GitLabBaseURL != "https://gitlab.example.com" {
+		t.Fatalf("gitlab_base_url = %q", payload.GitLabBaseURL)
+	}
+	if payload.GitLabProjectID != 123 {
+		t.Fatalf("gitlab_project_id = %d", payload.GitLabProjectID)
+	}
+	if payload.GitLabProjectPath != "platform/user-api" {
+		t.Fatalf("gitlab_project_path = %q", payload.GitLabProjectPath)
+	}
+	if !payload.OccurredAt.Equal(occurredAt) {
+		t.Fatalf("occurred_at = %s, want %s", payload.OccurredAt, occurredAt)
+	}
+
+	payloadText := string(record.Payload)
+	for _, forbidden := range []string{"token", "secret", "password", "private_key"} {
+		if strings.Contains(strings.ToLower(payloadText), forbidden) {
+			t.Fatalf("payload contains forbidden content %q: %s", forbidden, payloadText)
+		}
+	}
+	assertNoRawTokenOrInfrastructureDetails(t, payloadText)
+	assertNoRawTokenOrInfrastructureDetails(t, record.EventType)
+	assertNoRawTokenOrInfrastructureDetails(t, record.DedupKey)
+}
+
 func assertNoRawTokenOrInfrastructureDetails(t *testing.T, value string) {
 	t.Helper()
 
@@ -197,4 +341,77 @@ func assertNoRawTokenOrInfrastructureDetails(t *testing.T, value string) {
 			t.Fatalf("value contains forbidden detail %q: %s", forbidden, value)
 		}
 	}
+}
+
+func TestNewModuleDependenciesUpdated(t *testing.T) {
+	occurredAt := time.Date(2026, 6, 4, 12, 30, 0, 0, time.UTC)
+	moduleName, err := domain.NewModuleName("billing-api")
+	if err != nil {
+		t.Fatalf("module name: %v", err)
+	}
+	versionValue, err := domain.NewVersion("v1.2.3")
+	if err != nil {
+		t.Fatalf("version: %v", err)
+	}
+
+	record, err := NewModuleDependenciesUpdated(ModuleDependenciesUpdated{
+		Module: domain.Module{
+			ID:   domain.NewModuleID("module-1"),
+			Name: moduleName,
+		},
+		Version: domain.ModuleVersion{
+			ID:      domain.NewModuleVersionID("module-version-1"),
+			Version: versionValue,
+		},
+		DependencyCount:           3,
+		UnresolvedDependencyCount: 2,
+		OccurredAt:                occurredAt,
+	})
+	if err != nil {
+		t.Fatalf("event: %v", err)
+	}
+
+	if record.EventType != EventTypeModuleDependenciesUpdated {
+		t.Fatalf("event type = %q, want %q", record.EventType, EventTypeModuleDependenciesUpdated)
+	}
+	if record.DedupKey != "module:module-1:version:v1.2.3:dependencies-updated" {
+		t.Fatalf("dedup key = %q", record.DedupKey)
+	}
+	if record.AggregateType != aggregateTypeModule || record.AggregateID != "module-1" {
+		t.Fatalf("aggregate = %s/%s", record.AggregateType, record.AggregateID)
+	}
+
+	var payload ModuleDependenciesUpdatedPayload
+	if err := json.Unmarshal(record.Payload, &payload); err != nil {
+		t.Fatalf("payload json: %v", err)
+	}
+	if payload.ModuleID != "module-1" {
+		t.Fatalf("module_id = %q", payload.ModuleID)
+	}
+	if payload.ModuleName != "billing-api" {
+		t.Fatalf("module_name = %q", payload.ModuleName)
+	}
+	if payload.ModuleVersionID != "module-version-1" {
+		t.Fatalf("module_version_id = %q", payload.ModuleVersionID)
+	}
+	if payload.Version != "v1.2.3" {
+		t.Fatalf("version = %q", payload.Version)
+	}
+	if payload.DependencyCount != 3 {
+		t.Fatalf("dependency_count = %d", payload.DependencyCount)
+	}
+	if payload.UnresolvedDependencyCount != 2 {
+		t.Fatalf("unresolved_dependency_count = %d", payload.UnresolvedDependencyCount)
+	}
+	if !payload.OccurredAt.Equal(occurredAt) {
+		t.Fatalf("occurred_at = %s, want %s", payload.OccurredAt, occurredAt)
+	}
+
+	payloadText := string(record.Payload)
+	if !strings.Contains(payloadText, "\"dependency_count\":3") || !strings.Contains(payloadText, "\"unresolved_dependency_count\":2") {
+		t.Fatalf("payload should use expected snake_case count fields: %s", payloadText)
+	}
+	assertNoRawTokenOrInfrastructureDetails(t, payloadText)
+	assertNoRawTokenOrInfrastructureDetails(t, record.EventType)
+	assertNoRawTokenOrInfrastructureDetails(t, record.DedupKey)
 }

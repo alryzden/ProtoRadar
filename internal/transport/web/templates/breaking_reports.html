@@ -1,0 +1,72 @@
+{{template "header" .}}
+<section class="hero compact">
+  <div>
+    <p class="eyebrow">Compatibility</p>
+    <h1>Breaking Reports</h1>
+    <p>{{.Message}}</p>
+  </div>
+  {{template "status_badge" .}}
+</section>
+<form class="toolbar" method="get" action="{{.BasePath}}/breaking-reports" aria-label="Breaking report filters">
+  <label class="field">Module
+    <input type="search" name="module" value="{{.ReportFilters.Module}}" placeholder="user-api">
+  </label>
+  <label class="field">Status
+    <select name="status">
+      <option value="" {{if not .ReportFilters.Status}}selected{{end}}>all</option>
+      <option value="passed" {{if eq .ReportFilters.Status "passed"}}selected{{end}}>passed</option>
+      <option value="breaking" {{if eq .ReportFilters.Status "breaking"}}selected{{end}}>breaking</option>
+      <option value="failed" {{if eq .ReportFilters.Status "failed"}}selected{{end}}>failed</option>
+    </select>
+  </label>
+  <label class="field">Search reports
+    <input type="search" name="q" value="{{.ReportFilters.Query}}" placeholder="module, target ref, report id">
+  </label>
+  <button class="button secondary" type="submit">Filter</button>
+  {{if .ReportFilters.HasFilters}}<a class="button ghost" href="{{.BasePath}}/breaking-reports">Clear</a>{{end}}
+</form>
+<section class="card">
+  <div class="section-heading">
+    <div>
+      <p class="eyebrow">Reports</p>
+      <h2>Breaking Check Results</h2>
+    </div>
+  </div>
+  {{if .Reports}}
+  <div class="table-wrap embedded">
+    <table>
+      <thead>
+        <tr>
+          <th>Created</th>
+          <th>Module</th>
+          <th>Base Version</th>
+          <th>Target Ref</th>
+          <th>Status</th>
+          <th>Changes</th>
+          <th>Actions</th>
+        </tr>
+      </thead>
+      <tbody>
+        {{range .Reports}}
+        <tr>
+          <td>{{if .CreatedAt}}{{.CreatedAt}}{{else}}<span class="muted">Unknown</span>{{end}}</td>
+          <td>{{if .ModuleURL}}<a class="strong-link" href="{{.ModuleURL}}">{{.Module}}</a>{{else}}<span class="muted">Unknown</span>{{end}}</td>
+          <td>{{if .BaseVersionURL}}<a class="code-inline" href="{{.BaseVersionURL}}">{{.BaseVersion}}</a>{{else if .BaseVersion}}<span class="code-inline">{{.BaseVersion}}</span>{{else}}<span class="muted">None</span>{{end}}</td>
+          <td>{{if .TargetRef}}<span class="code-inline">{{.TargetRef}}</span>{{else}}<span class="muted">None</span>{{end}}</td>
+          <td><span class="{{badgeClass .Status}}">{{badgeText .Status}}</span></td>
+          <td>{{.ChangeCount}}</td>
+          <td class="actions">
+            <a href="{{.ReportURL}}">Report details</a>
+            {{if .ModuleURL}}<a href="{{.ModuleURL}}">Module details</a>{{end}}
+            {{if .BaseVersionURL}}<a href="{{.BaseVersionURL}}">Base version</a>{{end}}
+          </td>
+        </tr>
+        {{end}}
+      </tbody>
+    </table>
+  </div>
+  {{else}}
+  {{template "empty_state" .}}
+  {{end}}
+</section>
+{{template "footer" .}}

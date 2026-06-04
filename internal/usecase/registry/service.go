@@ -11,25 +11,34 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/alryzden/ProtoRadar/internal/domain"
+	"github.com/alryzden/ProtoRadar/internal/format/breaking"
 	"github.com/alryzden/ProtoRadar/internal/integration/protoradarevents"
 	"github.com/alryzden/ProtoRadar/internal/outbox"
 	"github.com/alryzden/ProtoRadar/internal/storage"
 	"github.com/alryzden/ProtoRadar/internal/workspace"
 )
 
+const maxTargetRefLength = 256
+
 type Service struct {
 	modules        domain.ModuleRepository
+	gitLabProjects domain.ModuleGitLabProjectRepository
 	versions       domain.ModuleVersionRepository
 	artifacts      domain.ModuleVersionArtifactRepository
 	bufConfigs     domain.BufConfigRepository
 	metadata       domain.DescriptorMetadataRepository
+	reports        domain.BreakingReportRepository
 	tokens         domain.APITokenRepository
+	dependencies   ModuleVersionDependencyRebuilder
+	dependencyRead domain.ModuleDependencyRepository
 	transactions   domain.RegistryTransactionManager
 	outbox         outbox.Writer
 	artifactStore  storage.ArtifactStore
 	bufWorkflow    BufWorkflow
+	bufBreaking    BufBreakingChecker
 	clock          Clock
 	ids            IDGenerator
 	tokenGenerator TokenGenerator
@@ -38,15 +47,20 @@ type Service struct {
 
 func NewService(
 	modules domain.ModuleRepository,
+	gitLabProjects domain.ModuleGitLabProjectRepository,
 	versions domain.ModuleVersionRepository,
 	artifacts domain.ModuleVersionArtifactRepository,
 	bufConfigs domain.BufConfigRepository,
 	metadata domain.DescriptorMetadataRepository,
+	reports domain.BreakingReportRepository,
 	tokens domain.APITokenRepository,
+	dependencies ModuleVersionDependencyRebuilder,
+	dependencyRead domain.ModuleDependencyRepository,
 	transactions domain.RegistryTransactionManager,
 	outbox outbox.Writer,
 	artifactStore storage.ArtifactStore,
 	bufWorkflow BufWorkflow,
+	bufBreaking BufBreakingChecker,
 	clock Clock,
 	ids IDGenerator,
 	tokenGenerator TokenGenerator,
@@ -54,15 +68,20 @@ func NewService(
 ) *Service {
 	return &Service{
 		modules:        modules,
+		gitLabProjects: gitLabProjects,
 		versions:       versions,
 		artifacts:      artifacts,
 		bufConfigs:     bufConfigs,
 		metadata:       metadata,
+		reports:        reports,
 		tokens:         tokens,
+		dependencies:   dependencies,
+		dependencyRead: dependencyRead,
 		transactions:   transactions,
 		outbox:         outbox,
 		artifactStore:  artifactStore,
 		bufWorkflow:    bufWorkflow,
+		bufBreaking:    bufBreaking,
 		clock:          clock,
 		ids:            ids,
 		tokenGenerator: tokenGenerator,
@@ -131,6 +150,120 @@ func (svc *Service) GetModule(ctx context.Context, nameValue string) (domain.Mod
 		return domain.Module{}, ErrModuleNotFound
 	}
 	return module, err
+}
+
+func (svc *Service) LinkModuleGitLabProject(ctx context.Context, input LinkModuleGitLabProjectInput) (LinkModuleGitLabProjectOutput, error) {
+	name, err := domain.NewModuleName(input.ModuleName)
+	if err != nil {
+		return LinkModuleGitLabProjectOutput{}, ErrInvalidModuleName
+	}
+	if svc.gitLabProjects == nil {
+		return LinkModuleGitLabProjectOutput{}, ErrStorageFailure
+	}
+
+	inputMapping := domain.ModuleGitLabProject{
+		ModuleName:        name,
+		GitLabBaseURL:     input.GitLabBaseURL,
+		GitLabProjectID:   input.GitLabProjectID,
+		GitLabProjectPath: input.GitLabProjectPath,
+	}
+	normalizedInput, err := inputMapping.Normalized()
+	if err != nil {
+		return LinkModuleGitLabProjectOutput{}, mapGitLabMappingValidationError(err)
+	}
+
+	module, err := svc.modules.GetByName(ctx, name)
+	if errors.Is(err, domain.ErrNotFound) {
+		return LinkModuleGitLabProjectOutput{}, ErrModuleNotFound
+	}
+	if err != nil {
+		return LinkModuleGitLabProjectOutput{}, err
+	}
+
+	now := svc.clock.Now()
+	mappingID, err := svc.ids.NewModuleGitLabProjectID()
+	if err != nil {
+		return LinkModuleGitLabProjectOutput{}, err
+	}
+	mapping := domain.ModuleGitLabProject{
+		ID:                mappingID,
+		ModuleID:          module.ID,
+		ModuleName:        module.Name,
+		GitLabBaseURL:     normalizedInput.GitLabBaseURL,
+		GitLabProjectID:   normalizedInput.GitLabProjectID,
+		GitLabProjectPath: normalizedInput.GitLabProjectPath,
+		CreatedAt:         now,
+		UpdatedAt:         now,
+	}
+	normalized, err := mapping.Normalized()
+	if err != nil {
+		return LinkModuleGitLabProjectOutput{}, mapGitLabMappingValidationError(err)
+	}
+
+	var linked domain.ModuleGitLabProject
+	err = svc.transactions.WithinTransaction(ctx, func(txCtx context.Context) error {
+		if err := svc.gitLabProjects.Upsert(txCtx, normalized); err != nil {
+			if errors.Is(err, domain.ErrDuplicate) {
+				return ErrGitLabProjectAlreadyLinked
+			}
+			return err
+		}
+		stored, err := svc.gitLabProjects.GetByModuleID(txCtx, module.ID)
+		if err != nil {
+			return err
+		}
+		record, err := protoradarevents.NewModuleGitLabProjectLinked(stored, now)
+		if err != nil {
+			return err
+		}
+		if err := svc.outbox.Create(txCtx, record); err != nil {
+			if errors.Is(err, domain.ErrDuplicate) {
+				return ErrGitLabProjectAlreadyLinked
+			}
+			return err
+		}
+		linked = stored
+		return nil
+	})
+	if err != nil {
+		return LinkModuleGitLabProjectOutput{}, err
+	}
+
+	return LinkModuleGitLabProjectOutput{Mapping: linked}, nil
+}
+
+func (svc *Service) GetModuleGitLabProject(ctx context.Context, moduleName string) (GetModuleGitLabProjectOutput, error) {
+	module, err := svc.GetModule(ctx, moduleName)
+	if err != nil {
+		return GetModuleGitLabProjectOutput{}, err
+	}
+	if svc.gitLabProjects == nil {
+		return GetModuleGitLabProjectOutput{}, ErrStorageFailure
+	}
+
+	mapping, err := svc.gitLabProjects.GetByModuleID(ctx, module.ID)
+	if errors.Is(err, domain.ErrNotFound) {
+		return GetModuleGitLabProjectOutput{}, ErrModuleGitLabProjectNotFound
+	}
+	if err != nil {
+		return GetModuleGitLabProjectOutput{}, err
+	}
+	return GetModuleGitLabProjectOutput{Mapping: mapping}, nil
+}
+
+func mapGitLabMappingValidationError(err error) error {
+	switch {
+	case errors.Is(err, domain.ErrInvalidModuleName):
+		return ErrInvalidModuleName
+	case errors.Is(err, domain.ErrInvalidGitLabBaseURL):
+		return ErrInvalidGitLabBaseURL
+	case errors.Is(err, domain.ErrInvalidGitLabProjectID):
+		return ErrInvalidGitLabProjectID
+	case errors.Is(err, domain.ErrInvalidGitLabProjectPath):
+		return ErrInvalidGitLabProjectPath
+	default:
+		return err
+	}
 }
 
 func (svc *Service) PublishModuleVersion(ctx context.Context, req PublishModuleVersionRequest) (PublishModuleVersionResponse, error) {
@@ -288,6 +421,15 @@ func (svc *Service) PublishModuleVersion(ctx context.Context, req PublishModuleV
 		if err := svc.metadata.Save(txCtx, moduleVersion.ID, bufResult.DescriptorMetadata); err != nil {
 			return err
 		}
+		if svc.dependencies != nil {
+			if _, err := svc.dependencies.RebuildPublishedModuleVersionDependencies(txCtx, PublishedModuleVersionDependencyRebuildInput{
+				Module:   module,
+				Version:  moduleVersion,
+				Metadata: bufResult.DescriptorMetadata,
+			}); err != nil {
+				return err
+			}
+		}
 
 		record, err := protoradarevents.NewModuleVersionPublished(protoradarevents.ModuleVersionPublished{
 			Module:           module,
@@ -390,6 +532,193 @@ func (svc *Service) GetModuleVersionMetadata(ctx context.Context, moduleName str
 	return metadata, err
 }
 
+func (svc *Service) CheckBreaking(ctx context.Context, req CheckBreakingRequest) (CheckBreakingResponse, error) {
+	name, err := domain.NewModuleName(req.ModuleName)
+	if err != nil {
+		return CheckBreakingResponse{}, ErrInvalidModuleName
+	}
+	against := strings.TrimSpace(req.Against)
+	if against == "" {
+		against = strings.TrimSpace(svc.options.BreakingDefaultAgainst)
+	}
+	if against == "" {
+		return CheckBreakingResponse{}, ErrInvalidAgainst
+	}
+	targetRef := strings.TrimSpace(req.TargetRef)
+	if len(targetRef) > maxTargetRefLength {
+		return CheckBreakingResponse{}, ErrInvalidTargetRef
+	}
+	if targetRef == "" {
+		targetRef = "local"
+	}
+	if req.ProposedSourceArchive == nil {
+		return CheckBreakingResponse{}, ErrArtifactRequired
+	}
+	if req.ArchiveSizeBytes > 0 && svc.options.MaxArtifactSizeBytes > 0 && req.ArchiveSizeBytes > svc.options.MaxArtifactSizeBytes {
+		return CheckBreakingResponse{}, ErrArtifactTooLarge
+	}
+	if svc.bufBreaking == nil {
+		return CheckBreakingResponse{}, ErrBufBreakingUnavailable
+	}
+	if svc.reports == nil {
+		return CheckBreakingResponse{}, ErrBufBreakingUnavailable
+	}
+
+	module, err := svc.modules.GetByName(ctx, name)
+	if errors.Is(err, domain.ErrNotFound) {
+		return CheckBreakingResponse{}, ErrModuleNotFound
+	}
+	if err != nil {
+		return CheckBreakingResponse{}, err
+	}
+
+	baseline, err := svc.resolveBreakingBaseline(ctx, module.ID, against)
+	if err != nil {
+		return CheckBreakingResponse{}, err
+	}
+	bufImageArtifact, err := svc.artifacts.GetByModuleVersionAndKind(ctx, baseline.ID, domain.ArtifactKindBufImage)
+	if errors.Is(err, domain.ErrNotFound) {
+		return CheckBreakingResponse{}, ErrBaselineBufImageMissing
+	}
+	if err != nil {
+		return CheckBreakingResponse{}, err
+	}
+	baselineImage, err := svc.readStoredArtifact(ctx, bufImageArtifact.StorageKey)
+	if err != nil {
+		return CheckBreakingResponse{}, err
+	}
+
+	sourceBody, _, _, err := svc.readArtifact(req.ProposedSourceArchive)
+	if err != nil {
+		return CheckBreakingResponse{}, err
+	}
+
+	workdir, err := os.MkdirTemp("", "protoradar-breaking-*")
+	if err != nil {
+		return CheckBreakingResponse{}, err
+	}
+	defer os.RemoveAll(workdir)
+
+	maxUncompressed := svc.options.MaxSourceUncompressedSizeBytes
+	if maxUncompressed <= 0 {
+		maxUncompressed = svc.options.MaxArtifactSizeBytes
+	}
+	if err := workspace.ExtractTarGzSafe(ctx, bytes.NewReader(sourceBody), workdir, workspace.ExtractOptions{MaxUncompressedSizeBytes: maxUncompressed}); err != nil {
+		return CheckBreakingResponse{}, fmt.Errorf("%w: %v", ErrUnsafeArchive, err)
+	}
+	if _, err := os.Stat(filepath.Join(workdir, "buf.yaml")); err != nil {
+		if os.IsNotExist(err) {
+			return CheckBreakingResponse{}, ErrBufConfigNotFound
+		}
+		return CheckBreakingResponse{}, err
+	}
+
+	checkResult, err := svc.bufBreaking.CheckBreaking(ctx, BufBreakingCheckInput{
+		Workdir:       workdir,
+		BaselineImage: baselineImage,
+		TargetRef:     targetRef,
+	})
+	if err != nil {
+		return CheckBreakingResponse{}, fmt.Errorf("%w: %v", ErrBufBreakingFailed, err)
+	}
+	status := checkResult.Status
+	if status == "" {
+		if len(checkResult.Changes) > 0 {
+			status = domain.BreakingReportStatusBreaking
+		} else {
+			status = domain.BreakingReportStatusPassed
+		}
+	}
+	if !status.IsValid() {
+		return CheckBreakingResponse{}, ErrBufBreakingFailed
+	}
+	if status == domain.BreakingReportStatusFailed {
+		return CheckBreakingResponse{}, ErrBufBreakingFailed
+	}
+
+	now := svc.clock.Now()
+	reportID, err := svc.ids.NewBreakingReportID()
+	if err != nil {
+		return CheckBreakingResponse{}, err
+	}
+	resultChanges := checkResult.Changes
+	if svc.options.BreakingMaxChanges > 0 && len(resultChanges) > svc.options.BreakingMaxChanges {
+		resultChanges = resultChanges[:svc.options.BreakingMaxChanges]
+	}
+	changes := make([]domain.BreakingChange, len(resultChanges))
+	for index, change := range resultChanges {
+		changeID, err := svc.ids.NewBreakingChangeID()
+		if err != nil {
+			return CheckBreakingResponse{}, err
+		}
+		change.ID = changeID
+		change.ReportID = reportID
+		if strings.TrimSpace(change.Severity) == "" {
+			change.Severity = "error"
+		}
+		change.CreatedAt = now
+		changes[index] = change
+	}
+	report := domain.BreakingReport{
+		ID:            reportID,
+		ModuleID:      module.ID,
+		ModuleName:    module.Name,
+		BaseVersionID: baseline.ID,
+		BaseVersion:   baseline.Version,
+		TargetRef:     targetRef,
+		Status:        status,
+		ChangeCount:   len(changes),
+		RawOutput:     checkResult.RawOutput,
+		HumanSummary:  checkResult.HumanSummary,
+		CreatedAt:     now,
+	}
+	if strings.TrimSpace(report.HumanSummary) == "" {
+		report.HumanSummary = breaking.FormatReport(report, changes)
+	}
+
+	err = svc.transactions.WithinTransaction(ctx, func(txCtx context.Context) error {
+		if err := svc.reports.Create(txCtx, report, changes); err != nil {
+			return err
+		}
+		record, err := protoradarevents.NewBreakingReportCreated(report)
+		if err != nil {
+			return err
+		}
+		if err := svc.outbox.Create(txCtx, record); err != nil {
+			return err
+		}
+		return nil
+	})
+	if err != nil {
+		return CheckBreakingResponse{}, err
+	}
+
+	return CheckBreakingResponse{Report: report, Changes: changes}, nil
+}
+
+func (svc *Service) GetBreakingReport(ctx context.Context, reportIDValue string) (CheckBreakingResponse, error) {
+	reportID := domain.NewBreakingReportID(reportIDValue)
+	if reportID == "" {
+		return CheckBreakingResponse{}, ErrBreakingReportNotFound
+	}
+	report, changes, err := svc.reports.GetByID(ctx, reportID)
+	if errors.Is(err, domain.ErrNotFound) {
+		return CheckBreakingResponse{}, ErrBreakingReportNotFound
+	}
+	if err != nil {
+		return CheckBreakingResponse{}, err
+	}
+	return CheckBreakingResponse{Report: report, Changes: changes}, nil
+}
+
+func (svc *Service) ListBreakingReports(ctx context.Context, moduleName string, limit int, offset int) ([]domain.BreakingReport, error) {
+	module, err := svc.GetModule(ctx, moduleName)
+	if err != nil {
+		return nil, err
+	}
+	return svc.reports.ListByModule(ctx, module.ID, limit, offset)
+}
+
 func (svc *Service) DownloadArtifact(ctx context.Context, moduleName string, versionValue string) (storage.ArtifactObject, domain.Artifact, error) {
 	moduleVersion, err := svc.GetModuleVersion(ctx, moduleName, versionValue)
 	if err != nil {
@@ -476,6 +805,40 @@ func (svc *Service) readArtifact(reader io.Reader) ([]byte, string, int64, error
 	}
 
 	return buffer.Bytes(), hex.EncodeToString(hasher.Sum(nil)), written, nil
+}
+
+func (svc *Service) readStoredArtifact(ctx context.Context, storageKey string) ([]byte, error) {
+	object, err := svc.artifactStore.Get(ctx, storageKey)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrStorageFailure, err)
+	}
+	defer object.Body.Close()
+
+	body, err := io.ReadAll(object.Body)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrStorageFailure, err)
+	}
+	return body, nil
+}
+
+func (svc *Service) resolveBreakingBaseline(ctx context.Context, moduleID domain.ModuleID, against string) (domain.ModuleVersion, error) {
+	if against == "latest" {
+		version, err := svc.versions.GetLatestByModule(ctx, moduleID)
+		if errors.Is(err, domain.ErrNotFound) {
+			return domain.ModuleVersion{}, ErrBaselineVersionNotFound
+		}
+		return version, err
+	}
+
+	versionValue, err := domain.NewVersion(against)
+	if err != nil {
+		return domain.ModuleVersion{}, ErrInvalidAgainst
+	}
+	version, err := svc.versions.GetByModuleAndVersion(ctx, moduleID, versionValue)
+	if errors.Is(err, domain.ErrNotFound) {
+		return domain.ModuleVersion{}, ErrBaselineVersionNotFound
+	}
+	return version, err
 }
 
 func checksumBytes(body []byte) (string, int64) {

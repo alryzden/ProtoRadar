@@ -9,6 +9,8 @@ type RuntimeConfig struct {
 	Auth     RuntimeAuthConfig
 	Registry RuntimeRegistryConfig
 	Buf      RuntimeBufConfig
+	Breaking RuntimeBreakingConfig
+	UI       RuntimeUIConfig
 }
 
 type RuntimeServerConfig struct {
@@ -48,4 +50,16 @@ type RuntimeBufConfig struct {
 	LintMode       string
 	RequireConfig  bool
 	MaxReportBytes int
+}
+
+type RuntimeBreakingConfig struct {
+	MaxReportBytes int
+	MaxChanges     int
+	DefaultAgainst string
+}
+
+type RuntimeUIConfig struct {
+	Enabled    bool
+	BasePath   string
+	StaticPath string
 }

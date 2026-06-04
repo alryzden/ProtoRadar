@@ -8,6 +8,8 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
+	"strconv"
 	"strings"
 
 	"github.com/alryzden/ProtoRadar/internal/cli/api"
@@ -33,6 +35,10 @@ func (app App) Run(ctx context.Context, args []string) error {
 		return app.module(ctx, args[1:])
 	case "push":
 		return app.push(ctx, args[1:])
+	case "check-breaking":
+		return app.checkBreaking(ctx, args[1:])
+	case "gitlab":
+		return app.gitlab(ctx, args[1:])
 	case "pull":
 		return app.pull(ctx, args[1:])
 	case "list":
@@ -85,6 +91,12 @@ func (app App) module(ctx context.Context, args []string) error {
 	switch args[0] {
 	case "create":
 		return app.createModule(ctx, args[1:])
+	case "link-gitlab":
+		return app.linkModuleGitLab(ctx, args[1:])
+	case "dependencies":
+		return app.moduleDependencies(ctx, args[1:])
+	case "affected":
+		return app.moduleAffected(ctx, args[1:])
 	default:
 		return fmt.Errorf("unknown module subcommand %q", args[0])
 	}
@@ -119,6 +131,145 @@ func (app App) createModule(ctx context.Context, args []string) error {
 	}
 
 	fmt.Fprintf(app.output(), "Created module %s\n", module.Name)
+	return nil
+}
+
+func (app App) linkModuleGitLab(ctx context.Context, args []string) error {
+	flags := flag.NewFlagSet("module link-gitlab", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	projectID := flags.String("project-id", "", "GitLab project ID")
+	projectPath := flags.String("project-path", "", "GitLab project path")
+	gitLabBaseURL := flags.String("gitlab-base-url", "", "GitLab base URL")
+	if err := flags.Parse(flagsFirst(args, nil)); err != nil {
+		return err
+	}
+	if flags.NArg() != 1 {
+		return errors.New("module link-gitlab requires a module name")
+	}
+
+	projectIDValue := strings.TrimSpace(*projectID)
+	if projectIDValue == "" {
+		projectIDValue = strings.TrimSpace(os.Getenv("CI_PROJECT_ID"))
+	}
+	projectPathValue := strings.TrimSpace(*projectPath)
+	if projectPathValue == "" {
+		projectPathValue = strings.TrimSpace(os.Getenv("CI_PROJECT_PATH"))
+	}
+	gitLabBaseURLValue := strings.TrimSpace(*gitLabBaseURL)
+	if gitLabBaseURLValue == "" {
+		gitLabBaseURLValue = strings.TrimSpace(os.Getenv("CI_SERVER_URL"))
+	}
+
+	if projectIDValue == "" {
+		return errors.New("module link-gitlab requires --project-id")
+	}
+	parsedProjectID, err := strconv.ParseInt(projectIDValue, 10, 64)
+	if err != nil || parsedProjectID <= 0 {
+		return errors.New("module link-gitlab requires --project-id greater than zero")
+	}
+	if projectPathValue == "" {
+		return errors.New("module link-gitlab requires --project-path")
+	}
+	if gitLabBaseURLValue == "" {
+		return errors.New("module link-gitlab requires --gitlab-base-url")
+	}
+	if err := validateServerURL(gitLabBaseURLValue); err != nil {
+		return fmt.Errorf("invalid GitLab base URL: %w", err)
+	}
+
+	client, err := app.client()
+	if err != nil {
+		return err
+	}
+	mapping, err := client.LinkModuleGitLabProject(ctx, flags.Arg(0), api.LinkModuleGitLabProjectRequest{
+		GitLabBaseURL:     gitLabBaseURLValue,
+		GitLabProjectID:   parsedProjectID,
+		GitLabProjectPath: projectPathValue,
+	})
+	if err != nil {
+		if errors.Is(err, api.ErrUnauthorized) {
+			return errors.New("module link-gitlab failed: unauthorized")
+		}
+		if errors.Is(err, api.ErrNotFound) {
+			return fmt.Errorf("module %q was not found", flags.Arg(0))
+		}
+		if errors.Is(err, api.ErrConflict) {
+			return fmt.Errorf("GitLab project %s (%d) is already linked to another module", projectPathValue, parsedProjectID)
+		}
+		return fmt.Errorf("module link-gitlab failed: %w", err)
+	}
+
+	moduleName := mapping.Module
+	if moduleName == "" {
+		moduleName = flags.Arg(0)
+	}
+	responseProjectPath := mapping.GitLabProjectPath
+	if responseProjectPath == "" {
+		responseProjectPath = projectPathValue
+	}
+	responseProjectID := mapping.GitLabProjectID
+	if responseProjectID == 0 {
+		responseProjectID = parsedProjectID
+	}
+	fmt.Fprintf(app.output(), "Linked module %s to GitLab project %s (%d)\n", moduleName, responseProjectPath, responseProjectID)
+	return nil
+}
+
+func (app App) moduleDependencies(ctx context.Context, args []string) error {
+	flags := flag.NewFlagSet("module dependencies", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	if err := flags.Parse(flagsFirst(args, nil)); err != nil {
+		return err
+	}
+	if flags.NArg() != 1 {
+		return errors.New("module dependencies requires a module name")
+	}
+
+	client, err := app.client()
+	if err != nil {
+		return err
+	}
+	graph, err := client.GetModuleDependencies(ctx, flags.Arg(0))
+	if err != nil {
+		if errors.Is(err, api.ErrUnauthorized) {
+			return errors.New("module dependencies failed: unauthorized")
+		}
+		if errors.Is(err, api.ErrNotFound) {
+			return fmt.Errorf("module %q was not found", flags.Arg(0))
+		}
+		return fmt.Errorf("module dependencies failed: %w", err)
+	}
+
+	printModuleDependencies(app.output(), graph)
+	return nil
+}
+
+func (app App) moduleAffected(ctx context.Context, args []string) error {
+	flags := flag.NewFlagSet("module affected", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	if err := flags.Parse(flagsFirst(args, nil)); err != nil {
+		return err
+	}
+	if flags.NArg() != 1 {
+		return errors.New("module affected requires a module name")
+	}
+
+	client, err := app.client()
+	if err != nil {
+		return err
+	}
+	affected, err := client.GetAffectedModules(ctx, flags.Arg(0))
+	if err != nil {
+		if errors.Is(err, api.ErrUnauthorized) {
+			return errors.New("module affected failed: unauthorized")
+		}
+		if errors.Is(err, api.ErrNotFound) {
+			return fmt.Errorf("module %q was not found", flags.Arg(0))
+		}
+		return fmt.Errorf("module affected failed: %w", err)
+	}
+
+	printAffectedModules(app.output(), affected)
 	return nil
 }
 
@@ -230,6 +381,67 @@ func (app App) push(ctx context.Context, args []string) error {
 	return nil
 }
 
+func (app App) checkBreaking(ctx context.Context, args []string) error {
+	flags := flag.NewFlagSet("check-breaking", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	path := flags.String("path", "", "Buf workspace root")
+	against := flags.String("against", "latest", "baseline version or latest")
+	targetRef := flags.String("target-ref", "", "target reference")
+	reportFile := flags.String("report-file", "", "human-readable report file")
+	if err := flags.Parse(flagsFirst(args, nil)); err != nil {
+		return err
+	}
+	if flags.NArg() != 1 {
+		return errors.New("check-breaking requires a module name")
+	}
+	if strings.TrimSpace(*path) == "" {
+		return errors.New("check-breaking requires --path")
+	}
+	if strings.TrimSpace(*against) == "" {
+		return errors.New("check-breaking requires --against")
+	}
+
+	artifact, err := createArtifact(*path)
+	if err != nil {
+		return err
+	}
+	client, err := app.client()
+	if err != nil {
+		return err
+	}
+	report, err := client.CheckBreaking(ctx, flags.Arg(0), strings.TrimSpace(*against), strings.TrimSpace(*targetRef), "source.tar.gz", artifact.Body)
+	if err != nil {
+		if errors.Is(err, api.ErrUnauthorized) {
+			return fmt.Errorf("check-breaking failed: unauthorized")
+		}
+		if errors.Is(err, api.ErrNotFound) {
+			return fmt.Errorf("check-breaking failed: module or baseline was not found")
+		}
+		if errors.Is(err, api.ErrConflict) {
+			return fmt.Errorf("check-breaking failed: baseline is not Buf-compatible")
+		}
+		if errors.Is(err, api.ErrTooLarge) {
+			return fmt.Errorf("check-breaking failed: artifact too large")
+		}
+		return fmt.Errorf("check-breaking failed: %w", err)
+	}
+
+	summary := strings.TrimSpace(report.HumanSummary)
+	if summary == "" {
+		summary = fallbackBreakingSummary(report)
+	}
+	if strings.TrimSpace(*reportFile) != "" {
+		if err := os.WriteFile(strings.TrimSpace(*reportFile), []byte(summary+"\n"), 0o600); err != nil {
+			return fmt.Errorf("write report file: %w", err)
+		}
+	}
+	fmt.Fprintln(app.output(), summary)
+	if report.Status == "breaking" {
+		return ExitError{Code: 1}
+	}
+	return nil
+}
+
 func (app App) pull(ctx context.Context, args []string) error {
 	flags := flag.NewFlagSet("pull", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
@@ -270,7 +482,7 @@ func (app App) pull(ctx context.Context, args []string) error {
 }
 
 func (app App) usage() error {
-	return errors.New("usage: protoradar <login|module|push|pull|list>")
+	return errors.New("usage: protoradar <login|module|push|check-breaking|gitlab|pull|list>")
 }
 
 func (app App) configPath() (string, error) {
@@ -327,6 +539,124 @@ func errNotImplemented(command string) error {
 }
 
 const timeFormat = "2006-01-02T15:04:05Z07:00"
+
+type ExitError struct {
+	Code int
+	Err  error
+}
+
+func (err ExitError) Error() string {
+	if err.Err == nil {
+		return ""
+	}
+	return err.Err.Error()
+}
+
+func (err ExitError) Unwrap() error {
+	return err.Err
+}
+
+func fallbackBreakingSummary(report api.BreakingReport) string {
+	var builder strings.Builder
+	builder.WriteString("ProtoRadar Breaking Change Report\n\n")
+	if report.Module != "" {
+		fmt.Fprintf(&builder, "Module: %s\n", report.Module)
+	}
+	if report.Against != "" {
+		fmt.Fprintf(&builder, "Against: %s\n", report.Against)
+	}
+	target := report.TargetRef
+	if strings.TrimSpace(target) == "" {
+		target = "local"
+	}
+	fmt.Fprintf(&builder, "Target: %s\n", target)
+	fmt.Fprintf(&builder, "Status: %s\n", report.Status)
+	fmt.Fprintf(&builder, "Changes: %d\n", report.ChangeCount)
+	if report.Status == "breaking" {
+		builder.WriteString("\nBreaking changes:\n")
+		for index, change := range report.Changes {
+			filePath := change.FilePath
+			if strings.TrimSpace(filePath) == "" {
+				filePath = "(unknown file)"
+			}
+			fmt.Fprintf(&builder, "%d. %s\n", index+1, filePath)
+			writeFallbackLine(&builder, "Rule", change.RuleID)
+			writeFallbackLine(&builder, "Symbol", change.Symbol)
+			writeFallbackLine(&builder, "Package", change.PackageName)
+			writeFallbackLine(&builder, "Category", change.Category)
+			writeFallbackLine(&builder, "Severity", change.Severity)
+			writeFallbackLine(&builder, "Message", change.Message)
+		}
+		builder.WriteString("\nResult: breaking changes found.")
+		return builder.String()
+	}
+	builder.WriteString("\nNo breaking changes found.\n\nResult: no breaking changes found.")
+	return builder.String()
+}
+
+func printModuleDependencies(w io.Writer, graph api.ModuleDependencyGraph) {
+	fmt.Fprintf(w, "Module: %s\n\n", graph.Module)
+	fmt.Fprintln(w, "Downstream consumers:")
+	printDependencyModules(w, graph.Downstream, "No downstream modules are currently known to depend on this module.")
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "Upstream dependencies:")
+	printDependencyModules(w, graph.Upstream, "No upstream dependencies are currently known for this module.")
+	if len(graph.Unresolved) > 0 {
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "Unresolved dependencies:")
+		for _, dependency := range graph.Unresolved {
+			target := strings.TrimSpace(dependency.ImportPath)
+			if target == "" {
+				target = strings.TrimSpace(dependency.ReferencedSymbol)
+			}
+			if target == "" {
+				target = "(unknown dependency)"
+			}
+			fmt.Fprintf(w, "- %s\n", target)
+			writeOutputLine(w, "  reason", dependency.Reason)
+		}
+	}
+}
+
+func printAffectedModules(w io.Writer, affected api.AffectedModules) {
+	fmt.Fprintf(w, "Module: %s\n\n", affected.Module)
+	fmt.Fprintln(w, "Affected modules:")
+	printDependencyModules(w, affected.AffectedModules, "No downstream modules are currently known to depend on this module.")
+}
+
+func printDependencyModules(w io.Writer, modules []api.DependencyModule, emptyMessage string) {
+	if len(modules) == 0 {
+		fmt.Fprintf(w, "%s\n", emptyMessage)
+		return
+	}
+	for _, module := range modules {
+		version := strings.TrimSpace(module.LatestVersion)
+		if version == "" {
+			version = "unknown"
+		}
+		fmt.Fprintf(w, "- %s@%s\n", module.Module, version)
+		if len(module.DependencySources) > 0 {
+			fmt.Fprintf(w, "  sources: %s\n", strings.Join(module.DependencySources, ", "))
+		}
+		for _, reason := range module.Reasons {
+			writeOutputLine(w, "  reason", reason)
+		}
+	}
+}
+
+func writeOutputLine(w io.Writer, label string, value string) {
+	if strings.TrimSpace(value) == "" {
+		return
+	}
+	fmt.Fprintf(w, "%s: %s\n", label, value)
+}
+
+func writeFallbackLine(builder *strings.Builder, label string, value string) {
+	if strings.TrimSpace(value) == "" {
+		return
+	}
+	fmt.Fprintf(builder, "   %s: %s\n", label, value)
+}
 
 func flagsFirst(args []string, boolFlags map[string]bool) []string {
 	var flags []string

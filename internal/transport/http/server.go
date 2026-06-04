@@ -20,11 +20,19 @@ type Registry interface {
 	CreateModule(ctx context.Context, req registry.CreateModuleRequest) (domain.Module, error)
 	ListModules(ctx context.Context, limit int, offset int) ([]domain.Module, error)
 	GetModule(ctx context.Context, name string) (domain.Module, error)
+	LinkModuleGitLabProject(ctx context.Context, input registry.LinkModuleGitLabProjectInput) (registry.LinkModuleGitLabProjectOutput, error)
+	GetModuleGitLabProject(ctx context.Context, moduleName string) (registry.GetModuleGitLabProjectOutput, error)
 	PublishModuleVersion(ctx context.Context, req registry.PublishModuleVersionRequest) (registry.PublishModuleVersionResponse, error)
 	ListModuleVersions(ctx context.Context, moduleName string, limit int, offset int) ([]domain.ModuleVersion, error)
 	GetModuleVersion(ctx context.Context, moduleName string, version string) (domain.ModuleVersion, error)
 	GetModuleVersionDetails(ctx context.Context, moduleName string, version string) (registry.ModuleVersionDetailsResponse, error)
 	GetModuleVersionMetadata(ctx context.Context, moduleName string, version string) (domain.DescriptorMetadata, error)
+	CheckBreaking(ctx context.Context, req registry.CheckBreakingRequest) (registry.CheckBreakingResponse, error)
+	GetBreakingReport(ctx context.Context, reportID string) (registry.CheckBreakingResponse, error)
+	ListBreakingReports(ctx context.Context, moduleName string, limit int, offset int) ([]domain.BreakingReport, error)
+	GetModuleDependencyGraph(ctx context.Context, moduleName string) (registry.ModuleDependencyGraphResponse, error)
+	ListAffectedModules(ctx context.Context, moduleName string) (registry.AffectedModulesResponse, error)
+	GetBreakingReportAffectedModules(ctx context.Context, reportID string) (registry.BreakingReportAffectedModulesResponse, error)
 	DownloadArtifact(ctx context.Context, moduleName string, version string) (storage.ArtifactObject, domain.Artifact, error)
 	CreateAPIToken(ctx context.Context, req registry.CreateAPITokenRequest) (registry.CreateAPITokenResponse, error)
 	AuthenticateToken(ctx context.Context, rawToken string) (registry.AuthSubject, error)
@@ -57,11 +65,19 @@ func (server *Server) Handler() http.Handler {
 	mux.Handle("POST /api/v1/modules", server.requireBearer(http.HandlerFunc(server.createModule)))
 	mux.Handle("GET /api/v1/modules", server.requireBearer(http.HandlerFunc(server.listModules)))
 	mux.Handle("GET /api/v1/modules/{module}", server.requireBearer(http.HandlerFunc(server.getModule)))
+	mux.Handle("PUT /api/v1/modules/{module}/gitlab-project", server.requireBearer(http.HandlerFunc(server.linkModuleGitLabProject)))
+	mux.Handle("GET /api/v1/modules/{module}/gitlab-project", server.requireBearer(http.HandlerFunc(server.getModuleGitLabProject)))
+	mux.Handle("GET /api/v1/modules/{module}/dependencies", server.requireBearer(http.HandlerFunc(server.getModuleDependencies)))
+	mux.Handle("GET /api/v1/modules/{module}/affected", server.requireBearer(http.HandlerFunc(server.getAffectedModules)))
 	mux.Handle("POST /api/v1/modules/{module}/versions", server.requireBearer(http.HandlerFunc(server.publishModuleVersion)))
 	mux.Handle("GET /api/v1/modules/{module}/versions", server.requireBearer(http.HandlerFunc(server.listModuleVersions)))
 	mux.Handle("GET /api/v1/modules/{module}/versions/{version}", server.requireBearer(http.HandlerFunc(server.getModuleVersion)))
 	mux.Handle("GET /api/v1/modules/{module}/versions/{version}/metadata", server.requireBearer(http.HandlerFunc(server.getModuleVersionMetadata)))
 	mux.Handle("GET /api/v1/modules/{module}/versions/{version}/artifact", server.requireBearer(http.HandlerFunc(server.downloadArtifact)))
+	mux.Handle("POST /api/v1/modules/{module}/breaking-checks", server.requireBearer(http.HandlerFunc(server.createBreakingCheck)))
+	mux.Handle("GET /api/v1/modules/{module}/breaking-reports", server.requireBearer(http.HandlerFunc(server.listBreakingReports)))
+	mux.Handle("GET /api/v1/breaking-reports/{report_id}", server.requireBearer(http.HandlerFunc(server.getBreakingReport)))
+	mux.Handle("GET /api/v1/breaking-reports/{report_id}/affected-modules", server.requireBearer(http.HandlerFunc(server.getBreakingReportAffectedModules)))
 	mux.Handle("POST /api/v1/tokens", server.requireBootstrapToken(http.HandlerFunc(server.createAPIToken)))
 
 	return mux
@@ -166,6 +182,53 @@ func (server *Server) getModule(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, moduleResponse(module))
 }
 
+func (server *Server) linkModuleGitLabProject(w http.ResponseWriter, r *http.Request) {
+	var req linkModuleGitLabProjectRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request")
+		return
+	}
+
+	response, err := server.registry.LinkModuleGitLabProject(r.Context(), registry.LinkModuleGitLabProjectInput{
+		ModuleName:        r.PathValue("module"),
+		GitLabBaseURL:     req.GitLabBaseURL,
+		GitLabProjectID:   req.GitLabProjectID,
+		GitLabProjectPath: req.GitLabProjectPath,
+	})
+	if err != nil {
+		writeUsecaseError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, moduleGitLabProjectResponse(response.Mapping))
+}
+
+func (server *Server) getModuleGitLabProject(w http.ResponseWriter, r *http.Request) {
+	response, err := server.registry.GetModuleGitLabProject(r.Context(), r.PathValue("module"))
+	if err != nil {
+		writeUsecaseError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, moduleGitLabProjectResponse(response.Mapping))
+}
+
+func (server *Server) getModuleDependencies(w http.ResponseWriter, r *http.Request) {
+	response, err := server.registry.GetModuleDependencyGraph(r.Context(), r.PathValue("module"))
+	if err != nil {
+		writeUsecaseError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, moduleDependencyGraphResponse(response))
+}
+
+func (server *Server) getAffectedModules(w http.ResponseWriter, r *http.Request) {
+	response, err := server.registry.ListAffectedModules(r.Context(), r.PathValue("module"))
+	if err != nil {
+		writeUsecaseError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, affectedModulesResponse(response))
+}
+
 func (server *Server) publishModuleVersion(w http.ResponseWriter, r *http.Request) {
 	if err := r.ParseMultipartForm(32 << 20); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request")
@@ -232,6 +295,72 @@ func (server *Server) getModuleVersionMetadata(w http.ResponseWriter, r *http.Re
 		return
 	}
 	writeJSON(w, http.StatusOK, descriptorMetadataResponse(metadata))
+}
+
+func (server *Server) createBreakingCheck(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseMultipartForm(32 << 20); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request")
+		return
+	}
+
+	file, header, err := r.FormFile("artifact")
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request")
+		return
+	}
+	defer file.Close()
+
+	var sizeBytes int64
+	var archiveName string
+	if header != nil {
+		sizeBytes = header.Size
+		archiveName = header.Filename
+	}
+	response, err := server.registry.CheckBreaking(r.Context(), registry.CheckBreakingRequest{
+		ModuleName:            r.PathValue("module"),
+		Against:               strings.TrimSpace(r.FormValue("against")),
+		TargetRef:             strings.TrimSpace(r.FormValue("target_ref")),
+		ProposedSourceArchive: file,
+		ArchiveName:           archiveName,
+		ArchiveSizeBytes:      sizeBytes,
+	})
+	if err != nil {
+		writeUsecaseError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, breakingReportResponse(response.Report, response.Changes))
+}
+
+func (server *Server) getBreakingReport(w http.ResponseWriter, r *http.Request) {
+	response, err := server.registry.GetBreakingReport(r.Context(), r.PathValue("report_id"))
+	if err != nil {
+		writeUsecaseError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, breakingReportResponse(response.Report, response.Changes))
+}
+
+func (server *Server) getBreakingReportAffectedModules(w http.ResponseWriter, r *http.Request) {
+	response, err := server.registry.GetBreakingReportAffectedModules(r.Context(), r.PathValue("report_id"))
+	if err != nil {
+		writeUsecaseError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, breakingReportAffectedModulesResponse(response))
+}
+
+func (server *Server) listBreakingReports(w http.ResponseWriter, r *http.Request) {
+	limit := parsePositiveInt(r.URL.Query().Get("limit"), 100)
+	reports, err := server.registry.ListBreakingReports(r.Context(), r.PathValue("module"), limit, 0)
+	if err != nil {
+		writeUsecaseError(w, err)
+		return
+	}
+	items := make([]breakingReportSummaryDTO, 0, len(reports))
+	for _, report := range reports {
+		items = append(items, breakingReportSummaryResponse(report))
+	}
+	writeJSON(w, http.StatusOK, listBreakingReportsResponse{Reports: items})
 }
 
 func (server *Server) downloadArtifact(w http.ResponseWriter, r *http.Request) {
@@ -305,16 +434,29 @@ func decodeJSON(r *http.Request, dst any) error {
 	return decoder.Decode(dst)
 }
 
+func parsePositiveInt(value string, fallback int) int {
+	if value == "" {
+		return fallback
+	}
+	var parsed int
+	if _, err := fmt.Sscanf(value, "%d", &parsed); err != nil || parsed <= 0 {
+		return fallback
+	}
+	return parsed
+}
+
 func writeUsecaseError(w http.ResponseWriter, err error) {
 	switch {
-	case errors.Is(err, registry.ErrInvalidModuleName), errors.Is(err, registry.ErrInvalidVersion):
+	case errors.Is(err, registry.ErrInvalidModuleName), errors.Is(err, registry.ErrInvalidVersion), errors.Is(err, registry.ErrInvalidAgainst), errors.Is(err, registry.ErrInvalidTargetRef), errors.Is(err, registry.ErrArtifactRequired), errors.Is(err, registry.ErrInvalidGitLabBaseURL), errors.Is(err, registry.ErrInvalidGitLabProjectID), errors.Is(err, registry.ErrInvalidGitLabProjectPath):
 		writeError(w, http.StatusBadRequest, "invalid request")
 	case errors.Is(err, registry.ErrInvalidOrExpiredToken):
 		writeError(w, http.StatusUnauthorized, "unauthorized")
-	case errors.Is(err, registry.ErrModuleNotFound):
+	case errors.Is(err, registry.ErrModuleNotFound), errors.Is(err, registry.ErrBaselineVersionNotFound), errors.Is(err, registry.ErrBreakingReportNotFound), errors.Is(err, registry.ErrModuleGitLabProjectNotFound):
 		writeError(w, http.StatusNotFound, "not found")
-	case errors.Is(err, registry.ErrModuleAlreadyExists), errors.Is(err, registry.ErrModuleVersionAlreadyExists):
+	case errors.Is(err, registry.ErrModuleAlreadyExists), errors.Is(err, registry.ErrModuleVersionAlreadyExists), errors.Is(err, registry.ErrGitLabProjectAlreadyLinked):
 		writeError(w, http.StatusConflict, "conflict")
+	case errors.Is(err, registry.ErrBaselineBufImageMissing):
+		writeError(w, http.StatusConflict, "baseline buf image missing")
 	case errors.Is(err, registry.ErrArtifactTooLarge):
 		writeError(w, http.StatusRequestEntityTooLarge, "artifact too large")
 	case errors.Is(err, registry.ErrUnsafeArchive):
@@ -327,6 +469,8 @@ func writeUsecaseError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusUnprocessableEntity, "buf lint failed")
 	case errors.Is(err, registry.ErrDescriptorExtractionFailed):
 		writeError(w, http.StatusUnprocessableEntity, "descriptor extraction failed")
+	case errors.Is(err, registry.ErrBufBreakingFailed):
+		writeError(w, http.StatusInternalServerError, "buf breaking failed")
 	default:
 		writeError(w, http.StatusInternalServerError, "internal error")
 	}

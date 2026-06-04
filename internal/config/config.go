@@ -10,6 +10,8 @@ import (
 
 const defaultMaxArtifactSizeBytes int64 = 100 * 1024 * 1024
 const defaultBufMaxReportBytes = 16 * 1024
+const defaultBreakingMaxReportBytes = 32 * 1024
+const defaultBreakingMaxChanges = 1000
 
 const (
 	BufLintModeDisabled = "disabled"
@@ -24,6 +26,8 @@ type Config struct {
 	Auth     AuthConfig     `yaml:"auth"`
 	Registry RegistryConfig `yaml:"registry"`
 	Buf      BufConfig      `yaml:"buf"`
+	Breaking BreakingConfig `yaml:"breaking"`
+	UI       UIConfig       `yaml:"ui"`
 }
 
 type ServerConfig struct {
@@ -65,6 +69,18 @@ type BufConfig struct {
 	MaxReportBytes int    `yaml:"max_report_bytes"`
 }
 
+type BreakingConfig struct {
+	MaxReportBytes int    `yaml:"max_report_bytes"`
+	MaxChanges     int    `yaml:"max_changes"`
+	DefaultAgainst string `yaml:"default_against"`
+}
+
+type UIConfig struct {
+	Enabled    bool   `yaml:"enabled"`
+	BasePath   string `yaml:"base_path"`
+	StaticPath string `yaml:"static_path"`
+}
+
 func Defaults() Config {
 	return Config{
 		Server: ServerConfig{
@@ -86,6 +102,16 @@ func Defaults() Config {
 			LintMode:       BufLintModeWarn,
 			RequireConfig:  true,
 			MaxReportBytes: defaultBufMaxReportBytes,
+		},
+		Breaking: BreakingConfig{
+			MaxReportBytes: defaultBreakingMaxReportBytes,
+			MaxChanges:     defaultBreakingMaxChanges,
+			DefaultAgainst: "latest",
+		},
+		UI: UIConfig{
+			Enabled:    true,
+			BasePath:   "/ui",
+			StaticPath: "/ui/static",
 		},
 	}
 }
@@ -208,6 +234,30 @@ func applyYAMLValue(cfg *Config, path string, value string) error {
 			return fmt.Errorf("buf.max_report_bytes must be an integer")
 		}
 		cfg.Buf.MaxReportBytes = parsed
+	case "breaking.max_report_bytes":
+		parsed, err := strconv.Atoi(value)
+		if err != nil {
+			return fmt.Errorf("breaking.max_report_bytes must be an integer")
+		}
+		cfg.Breaking.MaxReportBytes = parsed
+	case "breaking.max_changes":
+		parsed, err := strconv.Atoi(value)
+		if err != nil {
+			return fmt.Errorf("breaking.max_changes must be an integer")
+		}
+		cfg.Breaking.MaxChanges = parsed
+	case "breaking.default_against":
+		cfg.Breaking.DefaultAgainst = value
+	case "ui.enabled":
+		parsed, err := strconv.ParseBool(value)
+		if err != nil {
+			return fmt.Errorf("ui.enabled must be a boolean")
+		}
+		cfg.UI.Enabled = parsed
+	case "ui.base_path":
+		cfg.UI.BasePath = value
+	case "ui.static_path":
+		cfg.UI.StaticPath = value
 	default:
 		return fmt.Errorf("%s is not a supported config field", path)
 	}
@@ -282,6 +332,36 @@ func (c *Config) ApplyEnv() error {
 		}
 		c.Buf.MaxReportBytes = parsed
 	}
+	if value, ok := os.LookupEnv("PROTORADAR_BREAKING_MAX_REPORT_BYTES"); ok {
+		parsed, err := strconv.Atoi(value)
+		if err != nil {
+			return fmt.Errorf("breaking.max_report_bytes must be an integer")
+		}
+		c.Breaking.MaxReportBytes = parsed
+	}
+	if value, ok := os.LookupEnv("PROTORADAR_BREAKING_MAX_CHANGES"); ok {
+		parsed, err := strconv.Atoi(value)
+		if err != nil {
+			return fmt.Errorf("breaking.max_changes must be an integer")
+		}
+		c.Breaking.MaxChanges = parsed
+	}
+	if value, ok := os.LookupEnv("PROTORADAR_BREAKING_DEFAULT_AGAINST"); ok {
+		c.Breaking.DefaultAgainst = value
+	}
+	if value, ok := os.LookupEnv("PROTORADAR_UI_ENABLED"); ok {
+		parsed, err := strconv.ParseBool(value)
+		if err != nil {
+			return fmt.Errorf("ui.enabled must be a boolean")
+		}
+		c.UI.Enabled = parsed
+	}
+	if value, ok := os.LookupEnv("PROTORADAR_UI_BASE_PATH"); ok {
+		c.UI.BasePath = value
+	}
+	if value, ok := os.LookupEnv("PROTORADAR_UI_STATIC_PATH"); ok {
+		c.UI.StaticPath = value
+	}
 	return nil
 }
 
@@ -299,6 +379,12 @@ func (c Config) Validate() error {
 		return err
 	}
 	if err := c.validateBuf(); err != nil {
+		return err
+	}
+	if err := c.validateBreaking(); err != nil {
+		return err
+	}
+	if err := c.validateUI(); err != nil {
 		return err
 	}
 	if err := c.validateDatabase(); err != nil {
@@ -375,6 +461,38 @@ func (c Config) validateBuf() error {
 	return nil
 }
 
+func (c Config) validateBreaking() error {
+	if c.Breaking.MaxReportBytes <= 0 {
+		return fmt.Errorf("breaking.max_report_bytes must be positive")
+	}
+	if c.Breaking.MaxChanges <= 0 {
+		return fmt.Errorf("breaking.max_changes must be positive")
+	}
+	if strings.TrimSpace(c.Breaking.DefaultAgainst) == "" {
+		return fmt.Errorf("breaking.default_against is required")
+	}
+	return nil
+}
+
+func (c Config) validateUI() error {
+	basePath := strings.TrimSpace(c.UI.BasePath)
+	staticPath := strings.TrimSpace(c.UI.StaticPath)
+	if !strings.HasPrefix(basePath, "/") {
+		return fmt.Errorf("ui.base_path must start with /")
+	}
+	if !strings.HasPrefix(staticPath, "/") {
+		return fmt.Errorf("ui.static_path must start with /")
+	}
+	if staticPath == basePath {
+		return fmt.Errorf("ui.static_path must be under ui.base_path")
+	}
+	basePrefix := strings.TrimRight(basePath, "/")
+	if basePrefix != "" && !strings.HasPrefix(staticPath, basePrefix+"/") {
+		return fmt.Errorf("ui.static_path must be under ui.base_path")
+	}
+	return nil
+}
+
 func (c Config) Runtime() (RuntimeConfig, error) {
 	if err := c.Validate(); err != nil {
 		return RuntimeConfig{}, err
@@ -421,7 +539,25 @@ func (c Config) Runtime() (RuntimeConfig, error) {
 			RequireConfig:  c.Buf.RequireConfig,
 			MaxReportBytes: c.Buf.MaxReportBytes,
 		},
+		Breaking: RuntimeBreakingConfig{
+			MaxReportBytes: c.Breaking.MaxReportBytes,
+			MaxChanges:     c.Breaking.MaxChanges,
+			DefaultAgainst: strings.TrimSpace(c.Breaking.DefaultAgainst),
+		},
+		UI: RuntimeUIConfig{
+			Enabled:    c.UI.Enabled,
+			BasePath:   normalizePath(c.UI.BasePath),
+			StaticPath: normalizePath(c.UI.StaticPath),
+		},
 	}, nil
+}
+
+func normalizePath(value string) string {
+	path := strings.TrimRight(strings.TrimSpace(value), "/")
+	if path == "" {
+		return "/"
+	}
+	return path
 }
 
 func parsePositiveDuration(path string, value string) (time.Duration, error) {

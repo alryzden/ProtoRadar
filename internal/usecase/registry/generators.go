@@ -24,6 +24,14 @@ func (RandomIDGenerator) NewModuleID() (domain.ModuleID, error) {
 	return domain.NewModuleID(value), nil
 }
 
+func (RandomIDGenerator) NewModuleGitLabProjectID() (domain.ModuleGitLabProjectID, error) {
+	value, err := randomHex(16)
+	if err != nil {
+		return "", err
+	}
+	return domain.NewModuleGitLabProjectID(value), nil
+}
+
 func (RandomIDGenerator) NewModuleVersionID() (domain.ModuleVersionID, error) {
 	value, err := randomHex(16)
 	if err != nil {
@@ -46,6 +54,38 @@ func (RandomIDGenerator) NewAPITokenID() (domain.APITokenID, error) {
 		return "", err
 	}
 	return domain.NewAPITokenID(value), nil
+}
+
+func (RandomIDGenerator) NewBreakingReportID() (domain.BreakingReportID, error) {
+	value, err := randomHex(16)
+	if err != nil {
+		return "", err
+	}
+	return domain.NewBreakingReportID(value), nil
+}
+
+func (RandomIDGenerator) NewBreakingChangeID() (domain.BreakingChangeID, error) {
+	value, err := randomHex(16)
+	if err != nil {
+		return "", err
+	}
+	return domain.NewBreakingChangeID(value), nil
+}
+
+func (RandomIDGenerator) NewModuleDependencyID() (domain.ModuleDependencyID, error) {
+	value, err := randomHex(16)
+	if err != nil {
+		return "", err
+	}
+	return domain.NewModuleDependencyID(value), nil
+}
+
+func (RandomIDGenerator) NewUnresolvedProtoDependencyID() (domain.UnresolvedProtoDependencyID, error) {
+	value, err := randomHex(16)
+	if err != nil {
+		return "", err
+	}
+	return domain.NewUnresolvedProtoDependencyID(value), nil
 }
 
 type RandomTokenGenerator struct{}
