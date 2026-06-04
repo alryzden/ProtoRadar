@@ -11,11 +11,12 @@ docker compose up
 Services:
 
 - `protoradar-server`: `http://localhost:8080`
+- Basic Web UI: `http://localhost:8080/ui`
 - PostgreSQL: `localhost:5432`
 - MinIO API: `http://localhost:9000`
 - MinIO console: `http://localhost:9001`
 
-The `minio-init` service creates the `protoradar` bucket if it does not already exist. The server image includes the Buf CLI so publish can run server-side `buf build` and optional `buf lint`.
+The `minio-init` service creates the `protoradar` bucket if it does not already exist. The server image includes the Buf CLI so publish can run server-side `buf build`, optional `buf lint`, and `buf breaking`.
 
 ## Local Environment
 
@@ -39,6 +40,12 @@ PROTORADAR_BUF_LINT_TIMEOUT=30s
 PROTORADAR_BUF_LINT_MODE=warn
 PROTORADAR_BUF_REQUIRE_CONFIG=true
 PROTORADAR_BUF_MAX_REPORT_BYTES=16384
+PROTORADAR_BREAKING_MAX_REPORT_BYTES=32768
+PROTORADAR_BREAKING_MAX_CHANGES=1000
+PROTORADAR_BREAKING_DEFAULT_AGAINST=latest
+PROTORADAR_UI_ENABLED=true
+PROTORADAR_UI_BASE_PATH=/ui
+PROTORADAR_UI_STATIC_PATH=/ui/static
 ```
 
 Buf config ownership lives in `internal/config`. Bootstrap receives typed runtime values and only wires the concrete Buf CLI adapter.
@@ -70,11 +77,43 @@ protoradar module create user-api \
   --repository-url "https://gitlab.example.com/platform/user-api"
 
 protoradar push user-api \
-  --version v1.1.0 \
+  --version v1.0.0 \
   --path examples/user-api
 ```
 
 The `examples/user-api` directory is a Buf module root with `buf.yaml` and protobuf sources under `proto/`.
+
+Open `http://localhost:8080/ui/modules` to inspect the module list, module details, published version artifacts, Buf config, and descriptor metadata. See `docs/web-ui.md` for the full UI workflow.
+
+## Example Breaking Check
+
+After publishing a baseline, edit `examples/user-api/proto/user/v1/user.proto` in a breaking way, such as changing a field type or removing an RPC. Then run:
+
+```sh
+protoradar check-breaking user-api \
+  --path examples/user-api \
+  --against latest
+```
+
+Expected result for a breaking edit:
+
+- CLI prints a `ProtoRadar Breaking Change Report`;
+- process exits with code `1`;
+- server stores a breaking report and writes `BreakingReportCreated` through the transactional outbox.
+
+Open `http://localhost:8080/ui/breaking-reports` to inspect stored breaking reports and report details.
+
+## GitLab CI Examples
+
+GitLab CI templates live under `examples/gitlab`. They are documentation/examples only and do not change the local Docker Compose stack.
+
+Use them to exercise:
+
+- merge-request breaking checks with `protoradar check-breaking`;
+- tag-based publishing with `protoradar push`;
+- module-to-GitLab project mapping with `protoradar module link-gitlab`.
+
+See `docs/gitlab-ci.md` for the full CI workflow.
 
 ## Registry Development Rules
 
@@ -86,6 +125,7 @@ Keep the clean architecture boundaries intact:
 - infrastructure/bufcli contains concrete Buf CLI execution;
 - infrastructure/objectstorage/s3 contains the S3/MinIO adapter;
 - transport/http contains HTTP DTOs and handlers;
+- transport/web contains read-only HTML handlers and templates;
 - internal/cli talks only through the REST API;
 - app/bootstrap wires concrete dependencies only.
 
@@ -93,6 +133,9 @@ Usecases must not publish to Kafka/Sarama. For state-changing registry operation
 
 ## Known Limitations
 
-- Breaking-change comparison is not implemented yet.
-- Dependency graph UI is not implemented yet.
+- Dependency graph analysis is direct-only; transitive traversal is not implemented yet.
+- Approval and waiver workflows are not implemented yet.
+- Breaking diagnostic parsing is best-effort.
+- Web UI login/RBAC is not implemented yet.
+- Runtime usage and generated-client usage are not modeled yet.
 - Generated SDK workflows are not implemented yet.

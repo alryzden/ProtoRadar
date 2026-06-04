@@ -216,6 +216,179 @@ func TestExtractDescriptorMetadata(t *testing.T) {
 	}
 }
 
+func TestCheckBreakingRunsBufBreakingWithBaselineImage(t *testing.T) {
+	runner := &fakeRunner{results: []commandResult{{stdout: []byte("ok")}}}
+	workflow := newWorkflow(testConfig(LintModeDisabled), runner)
+	workdir := testWorkspace(t, true, false)
+
+	result, err := workflow.CheckBreaking(context.Background(), registry.BufBreakingCheckInput{
+		Workdir:       workdir,
+		BaselineImage: []byte("baseline image"),
+		TargetRef:     "local",
+	})
+	if err != nil {
+		t.Fatalf("check breaking: %v", err)
+	}
+	if result.Status != domain.BreakingReportStatusPassed {
+		t.Fatalf("status = %q", result.Status)
+	}
+	if len(runner.calls) != 1 {
+		t.Fatalf("commands = %d, want 1", len(runner.calls))
+	}
+	call := runner.calls[0]
+	if call.path != "/bin/buf" {
+		t.Fatalf("path = %q", call.path)
+	}
+	if len(call.args) != 4 || call.args[0] != "breaking" || call.args[1] != workdir || call.args[2] != "--against" || call.args[3] == "" {
+		t.Fatalf("args = %#v", call.args)
+	}
+	if call.dir != workdir {
+		t.Fatalf("dir = %q", call.dir)
+	}
+}
+
+func TestCheckBreakingExitCodeZeroMapsToPassed(t *testing.T) {
+	runner := &fakeRunner{results: []commandResult{{stdout: []byte("Success: no breaking changes")}}}
+	workflow := newWorkflow(testConfig(LintModeDisabled), runner)
+
+	result, err := workflow.CheckBreaking(context.Background(), registry.BufBreakingCheckInput{
+		Workdir:       testWorkspace(t, true, false),
+		BaselineImage: []byte("baseline image"),
+	})
+	if err != nil {
+		t.Fatalf("check breaking: %v", err)
+	}
+	if result.Status != domain.BreakingReportStatusPassed {
+		t.Fatalf("status = %q", result.Status)
+	}
+	if result.HumanSummary != "No breaking changes found." {
+		t.Fatalf("summary = %q", result.HumanSummary)
+	}
+}
+
+func TestCheckBreakingDiagnosticsMapToBreaking(t *testing.T) {
+	report := "user/v1/user.proto:12:5:FIELD_SAME_TYPE: Field \"email\" changed type from string to bytes.\n" +
+		"user/v1/user.proto:RPC_NO_DELETE: RPC user.v1.UserService.GetUser was deleted.\n"
+	runner := &fakeRunner{results: []commandResult{{stderr: []byte(report), exitCode: 100}}}
+	workflow := newWorkflow(testConfig(LintModeDisabled), runner)
+
+	result, err := workflow.CheckBreaking(context.Background(), registry.BufBreakingCheckInput{
+		Workdir:       testWorkspace(t, true, false),
+		BaselineImage: []byte("baseline image"),
+	})
+	if err != nil {
+		t.Fatalf("breaking diagnostics should not be internal error: %v", err)
+	}
+	if result.Status != domain.BreakingReportStatusBreaking {
+		t.Fatalf("status = %q", result.Status)
+	}
+	if len(result.Changes) != 2 {
+		t.Fatalf("changes = %d, want 2", len(result.Changes))
+	}
+	first := result.Changes[0]
+	if first.FilePath != "user/v1/user.proto" {
+		t.Fatalf("file path = %q", first.FilePath)
+	}
+	if first.RuleID != "FIELD_SAME_TYPE" {
+		t.Fatalf("rule id = %q", first.RuleID)
+	}
+	if !strings.Contains(first.Message, "email") {
+		t.Fatalf("message = %q", first.Message)
+	}
+	if first.Category != "field" {
+		t.Fatalf("category = %q", first.Category)
+	}
+}
+
+func TestCheckBreakingCommandFailureMapsToFailed(t *testing.T) {
+	runner := &fakeRunner{err: errors.New("exec failed")}
+	workflow := newWorkflow(testConfig(LintModeDisabled), runner)
+
+	result, err := workflow.CheckBreaking(context.Background(), registry.BufBreakingCheckInput{
+		Workdir:       testWorkspace(t, true, false),
+		BaselineImage: []byte("baseline image"),
+	})
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	if result.Status != domain.BreakingReportStatusFailed {
+		t.Fatalf("status = %q", result.Status)
+	}
+}
+
+func TestCheckBreakingNonDiagnosticFailureMapsToFailed(t *testing.T) {
+	runner := &fakeRunner{results: []commandResult{{stderr: []byte("failed to parse configuration"), exitCode: 1}}}
+	workflow := newWorkflow(testConfig(LintModeDisabled), runner)
+
+	result, err := workflow.CheckBreaking(context.Background(), registry.BufBreakingCheckInput{
+		Workdir:       testWorkspace(t, true, false),
+		BaselineImage: []byte("baseline image"),
+	})
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	if result.Status != domain.BreakingReportStatusFailed {
+		t.Fatalf("status = %q", result.Status)
+	}
+}
+
+func TestCheckBreakingCapturesStdoutAndStderr(t *testing.T) {
+	runner := &fakeRunner{results: []commandResult{{
+		stdout:   []byte("user/v1/user.proto:FIELD_NO_DELETE: field was deleted"),
+		stderr:   []byte("user/v1/user.proto:RPC_NO_DELETE: rpc was deleted"),
+		exitCode: 100,
+	}}}
+	workflow := newWorkflow(testConfig(LintModeDisabled), runner)
+
+	result, err := workflow.CheckBreaking(context.Background(), registry.BufBreakingCheckInput{
+		Workdir:       testWorkspace(t, true, false),
+		BaselineImage: []byte("baseline image"),
+	})
+	if err != nil {
+		t.Fatalf("check breaking: %v", err)
+	}
+	if !strings.Contains(result.RawOutput, "FIELD_NO_DELETE") || !strings.Contains(result.RawOutput, "RPC_NO_DELETE") {
+		t.Fatalf("raw output = %q", result.RawOutput)
+	}
+}
+
+func TestCheckBreakingTruncatesRawOutput(t *testing.T) {
+	runner := &fakeRunner{results: []commandResult{{
+		stderr:   []byte("user/v1/user.proto:FIELD_SAME_TYPE: 1234567890"),
+		exitCode: 100,
+	}}}
+	cfg := testConfig(LintModeDisabled)
+	cfg.MaxReportBytes = 24
+	workflow := newWorkflow(cfg, runner)
+
+	result, err := workflow.CheckBreaking(context.Background(), registry.BufBreakingCheckInput{
+		Workdir:       testWorkspace(t, true, false),
+		BaselineImage: []byte("baseline image"),
+	})
+	if err != nil {
+		t.Fatalf("check breaking: %v", err)
+	}
+	if len(result.RawOutput) != 24 {
+		t.Fatalf("raw output length = %d, want 24: %q", len(result.RawOutput), result.RawOutput)
+	}
+}
+
+func TestCheckBreakingReturnsContextCancellation(t *testing.T) {
+	runner := &fakeRunner{err: context.Canceled}
+	workflow := newWorkflow(testConfig(LintModeDisabled), runner)
+
+	result, err := workflow.CheckBreaking(context.Background(), registry.BufBreakingCheckInput{
+		Workdir:       testWorkspace(t, true, false),
+		BaselineImage: []byte("baseline image"),
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("error = %v, want context.Canceled", err)
+	}
+	if result.Status != domain.BreakingReportStatusFailed {
+		t.Fatalf("status = %q", result.Status)
+	}
+}
+
 type fakeRunner struct {
 	calls   []commandSpec
 	results []commandResult

@@ -14,9 +14,12 @@ type Clock interface {
 
 type IDGenerator interface {
 	NewModuleID() (domain.ModuleID, error)
+	NewModuleGitLabProjectID() (domain.ModuleGitLabProjectID, error)
 	NewModuleVersionID() (domain.ModuleVersionID, error)
 	NewArtifactID() (domain.ArtifactID, error)
 	NewAPITokenID() (domain.APITokenID, error)
+	NewBreakingReportID() (domain.BreakingReportID, error)
+	NewBreakingChangeID() (domain.BreakingChangeID, error)
 }
 
 type TokenGenerator interface {
@@ -27,9 +30,26 @@ type BufWorkflow interface {
 	Inspect(ctx context.Context, workdir string, options BufWorkflowOptions) (BufWorkflowResult, error)
 }
 
+type BufBreakingChecker interface {
+	CheckBreaking(ctx context.Context, input BufBreakingCheckInput) (BufBreakingCheckResult, error)
+}
+
 type BufWorkflowOptions struct {
 	RequireBufYAML bool
 	RunLint        bool
+}
+
+type BufBreakingCheckInput struct {
+	Workdir       string
+	BaselineImage []byte
+	TargetRef     string
+}
+
+type BufBreakingCheckResult struct {
+	Status       domain.BreakingReportStatus
+	Changes      []domain.BreakingChange
+	RawOutput    string
+	HumanSummary string
 }
 
 const (
@@ -52,6 +72,8 @@ type Options struct {
 	TokenHashSecret                string
 	BufRequireConfig               bool
 	BufLintMode                    string
+	BreakingMaxChanges             int
+	BreakingDefaultAgainst         string
 }
 
 type CreateModuleRequest struct {
@@ -60,10 +82,57 @@ type CreateModuleRequest struct {
 	RepositoryURL string
 }
 
+type LinkModuleGitLabProjectInput struct {
+	ModuleName        string
+	GitLabBaseURL     string
+	GitLabProjectID   int64
+	GitLabProjectPath string
+}
+
+type LinkModuleGitLabProjectOutput struct {
+	Mapping domain.ModuleGitLabProject
+}
+
+type GetModuleGitLabProjectOutput struct {
+	Mapping domain.ModuleGitLabProject
+}
+
 type PublishModuleVersionRequest struct {
 	ModuleName string
 	Version    string
 	Artifact   io.Reader
+}
+
+type CheckBreakingRequest struct {
+	ModuleName            string
+	Against               string
+	TargetRef             string
+	ProposedSourceArchive io.Reader
+	ArchiveName           string
+	ArchiveSizeBytes      int64
+	ArchiveChecksumSHA256 string
+}
+
+type CheckBreakingResponse struct {
+	Report  domain.BreakingReport
+	Changes []domain.BreakingChange
+}
+
+type ModuleDependencyGraphResponse struct {
+	Module     domain.Module
+	Upstream   []domain.ModuleDependency
+	Downstream []domain.ModuleDependency
+	Unresolved []domain.UnresolvedProtoDependency
+}
+
+type AffectedModulesResponse struct {
+	Module          domain.Module
+	AffectedModules []domain.AffectedModule
+}
+
+type BreakingReportAffectedModulesResponse struct {
+	Report          domain.BreakingReport
+	AffectedModules []domain.AffectedModule
 }
 
 type PublishModuleVersionResponse struct {

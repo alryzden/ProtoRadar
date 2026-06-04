@@ -10,7 +10,9 @@ import (
 	"github.com/alryzden/ProtoRadar/internal/config"
 	"github.com/alryzden/ProtoRadar/internal/infrastructure/bufcli"
 	"github.com/alryzden/ProtoRadar/internal/repository/postgres"
+	"github.com/alryzden/ProtoRadar/internal/usecase/dependencygraph"
 	"github.com/alryzden/ProtoRadar/internal/usecase/registry"
+	"github.com/alryzden/ProtoRadar/internal/usecase/uiquery"
 )
 
 type Server struct {
@@ -53,20 +55,62 @@ func NewServer(ctx context.Context, cfg config.RuntimeConfig, migrations fs.FS) 
 		pool.Close()
 		return nil, err
 	}
+	bufBreaking, err := bufcli.NewWorkflow(bufcli.Config{
+		BinaryPath:     cfg.Buf.BinaryPath,
+		BuildTimeout:   cfg.Buf.BuildTimeout,
+		LintTimeout:    cfg.Buf.LintTimeout,
+		LintMode:       cfg.Buf.LintMode,
+		RequireConfig:  cfg.Buf.RequireConfig,
+		MaxReportBytes: cfg.Breaking.MaxReportBytes,
+	})
+	if err != nil {
+		pool.Close()
+		return nil, err
+	}
+
+	moduleRepo := postgres.NewModuleRepository(db)
+	gitLabProjectRepo := postgres.NewModuleGitLabProjectRepository(db)
+	versionRepo := postgres.NewModuleVersionRepository(db)
+	artifactRepo := postgres.NewArtifactRepository(db)
+	bufConfigRepo := postgres.NewBufConfigRepository(db)
+	metadataRepo := postgres.NewDescriptorMetadataRepository(db)
+	breakingReportRepo := postgres.NewBreakingReportRepository(db)
+	dependencyRepo := postgres.NewModuleDependencyRepository(db)
+	tokenRepo := postgres.NewAPITokenRepository(db)
+	outboxWriter := postgres.NewOutboxWriter(db)
+	clock := registry.SystemClock{}
+	ids := registry.RandomIDGenerator{}
+
+	dependencyGraphService := dependencygraph.NewService(
+		moduleRepo,
+		versionRepo,
+		metadataRepo,
+		dependencyRepo,
+		dependencyRepo,
+		db,
+		outboxWriter,
+		clock,
+		ids,
+	)
 
 	registryService := registry.NewService(
-		postgres.NewModuleRepository(db),
-		postgres.NewModuleVersionRepository(db),
-		postgres.NewArtifactRepository(db),
-		postgres.NewBufConfigRepository(db),
-		postgres.NewDescriptorMetadataRepository(db),
-		postgres.NewAPITokenRepository(db),
+		moduleRepo,
+		gitLabProjectRepo,
+		versionRepo,
+		artifactRepo,
+		bufConfigRepo,
+		metadataRepo,
+		breakingReportRepo,
+		tokenRepo,
+		dependencyGraphService,
+		dependencyRepo,
 		db,
-		postgres.NewOutboxWriter(db),
+		outboxWriter,
 		artifactStore,
 		bufWorkflow,
-		registry.SystemClock{},
-		registry.RandomIDGenerator{},
+		bufBreaking,
+		clock,
+		ids,
 		registry.RandomTokenGenerator{},
 		registry.Options{
 			MaxArtifactSizeBytes:           cfg.Registry.MaxArtifactSizeBytes,
@@ -74,10 +118,26 @@ func NewServer(ctx context.Context, cfg config.RuntimeConfig, migrations fs.FS) 
 			TokenHashSecret:                cfg.Auth.TokenHashSecret,
 			BufRequireConfig:               cfg.Buf.RequireConfig,
 			BufLintMode:                    cfg.Buf.LintMode,
+			BreakingMaxChanges:             cfg.Breaking.MaxChanges,
+			BreakingDefaultAgainst:         cfg.Breaking.DefaultAgainst,
 		},
 	)
+	uiQueryService := uiquery.NewService(
+		moduleRepo,
+		gitLabProjectRepo,
+		versionRepo,
+		artifactRepo,
+		bufConfigRepo,
+		metadataRepo,
+		breakingReportRepo,
+		dependencyRepo,
+	)
 
-	handler := NewHTTPHandler(registryService, cfg, pool.Ping)
+	handler, err := NewHTTPHandler(registryService, uiQueryService, cfg, pool.Ping)
+	if err != nil {
+		pool.Close()
+		return nil, err
+	}
 	return &Server{
 		HTTPServer: &http.Server{
 			Addr:    cfg.Server.HTTPAddr,

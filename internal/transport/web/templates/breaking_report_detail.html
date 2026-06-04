@@ -1,0 +1,102 @@
+{{template "header" .}}
+{{with .ReportView}}
+<nav class="breadcrumb" aria-label="Breadcrumb">
+  <a href="{{.ReportsURL}}">Breaking Reports</a>
+  {{if .ModuleURL}}<span>/</span><a href="{{.ModuleURL}}">{{.Module}}</a>{{end}}
+  <span>/</span>
+  <span>{{.ID}}</span>
+</nav>
+<section class="hero compact">
+  <div>
+    <p class="eyebrow">Breaking Report</p>
+    <h1><span class="code-inline">{{.ID}}</span></h1>
+    <p>Inspect the summary, status, and individual protobuf compatibility changes for this report.</p>
+  </div>
+  <span class="{{badgeClass .Status}}">{{badgeText .Status}}</span>
+</section>
+<section class="grid three summary-grid">
+  <article class="card"><h2>Module</h2><p>{{if .ModuleURL}}<a href="{{.ModuleURL}}">{{.Module}}</a>{{else}}{{.Module}}{{end}}</p></article>
+  <article class="card"><h2>Base Version</h2><p>{{if .BaseVersionURL}}<a class="code-inline" href="{{.BaseVersionURL}}">{{.BaseVersion}}</a>{{else}}<span class="code-inline">{{.BaseVersion}}</span>{{end}}</p></article>
+  <article class="card"><h2>Target Ref</h2><p>{{if .TargetRef}}<span class="code-inline">{{.TargetRef}}</span>{{else}}<span class="muted">None</span>{{end}}</p></article>
+  <article class="card"><h2>Status</h2><p><span class="{{badgeClass .Status}}">{{badgeText .Status}}</span></p></article>
+  <article class="card"><h2>Changes</h2><p>{{.ChangeCount}}</p></article>
+  <article class="card"><h2>Created</h2><p>{{if .CreatedAt}}{{.CreatedAt}}{{else}}Unknown{{end}}</p></article>
+</section>
+<section class="card">
+  <div class="section-heading"><div><p class="eyebrow">Summary</p><h2>Human Summary</h2></div></div>
+  {{if .HumanSummary}}<pre class="pre-block">{{.HumanSummary}}</pre>{{else}}<p class="muted">No human summary stored for this report.</p>{{end}}
+</section>
+<section class="card">
+  <div class="section-heading"><div><p class="eyebrow">Changes</p><h2>Detected Changes</h2></div></div>
+  {{if .HasChanges}}
+  <div class="table-wrap embedded">
+    <table>
+      <thead>
+        <tr>
+          <th>File</th>
+          <th>Package</th>
+          <th>Symbol</th>
+          <th>Rule</th>
+          <th>Message</th>
+          <th>Severity</th>
+        </tr>
+      </thead>
+      <tbody>
+        {{range .Changes}}
+        <tr>
+          <td>{{if .FilePath}}<span class="code-inline">{{.FilePath}}</span>{{else}}<span class="muted">Unknown</span>{{end}}</td>
+          <td>{{if .PackageName}}<span class="code-inline">{{.PackageName}}</span>{{else}}<span class="muted">None</span>{{end}}</td>
+          <td>{{if .Symbol}}<span class="code-inline">{{.Symbol}}</span>{{else}}<span class="muted">None</span>{{end}}</td>
+          <td>{{if .RuleID}}<span class="code-inline">{{.RuleID}}</span>{{else}}<span class="muted">None</span>{{end}}</td>
+          <td>{{.Message}}</td>
+          <td>{{if .Severity}}<span class="{{badgeClass .Severity}}">{{badgeText .Severity}}</span>{{else}}<span class="badge badge-unknown">unknown</span>{{end}}</td>
+        </tr>
+        {{end}}
+      </tbody>
+    </table>
+  </div>
+  {{else}}
+  {{template "empty_state" $}}
+  {{end}}
+</section>
+<section class="card">
+  <div class="section-heading"><div><p class="eyebrow">Impact</p><h2>Potentially Affected Modules</h2></div></div>
+  {{if .HasAffectedModules}}
+  <div class="table-wrap embedded">
+    <table>
+      <thead>
+        <tr>
+          <th>Module</th>
+          <th>Latest Version</th>
+          <th>Dependency Sources</th>
+          <th>Reasons</th>
+          <th>Action</th>
+        </tr>
+      </thead>
+      <tbody>
+        {{range .AffectedModules}}
+        <tr>
+          <td><a href="{{.ModuleURL}}">{{.Module}}</a></td>
+          <td>{{if .Version}}<span class="code-inline">{{.Version}}</span>{{else}}<span class="muted">Unknown</span>{{end}}</td>
+          <td>{{if .DependencySources}}{{.DependencySources}}{{else}}<span class="muted">None</span>{{end}}</td>
+          <td>{{if .Reasons}}{{.Reasons}}{{else}}<span class="muted">None</span>{{end}}</td>
+          <td><a href="{{.ModuleURL}}">Module details</a></td>
+        </tr>
+        {{end}}
+      </tbody>
+    </table>
+  </div>
+  {{else}}
+  <p class="muted">No downstream modules are currently known to depend on this module.</p>
+  {{end}}
+</section>
+<section class="card">
+  <div class="section-heading"><div><p class="eyebrow">Links</p><h2>Navigation</h2></div></div>
+  <div class="actions">
+    <a class="button secondary" href="{{.ReportsURL}}">Back to reports list</a>
+    {{if .ModuleURL}}<a class="button secondary" href="{{.ModuleURL}}">Module details</a>{{end}}
+    {{if .BaseVersionURL}}<a class="button secondary" href="{{.BaseVersionURL}}">Base version details</a>{{end}}
+  </div>
+</section>
+{{end}}
+{{template "footer" .}}

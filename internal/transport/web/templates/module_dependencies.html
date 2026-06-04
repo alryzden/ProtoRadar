@@ -1,0 +1,108 @@
+{{template "header" .}}
+{{with .DependencyView}}
+<nav class="breadcrumb" aria-label="Breadcrumb">
+  <a href="{{.ModuleURL}}">Module {{.ModuleName}}</a>
+  <span>/</span>
+  <span>Dependencies</span>
+</nav>
+<section class="hero compact">
+  <div>
+    <p class="eyebrow">Dependency Graph</p>
+    <h1>{{.ModuleName}}</h1>
+    <p>Inspect downstream consumers, upstream dependencies, and unresolved protobuf references for this module.</p>
+  </div>
+  <a class="button secondary" href="{{.ModuleURL}}">Back to module details</a>
+</section>
+<section class="card">
+  <div class="section-heading"><div><p class="eyebrow">Downstream</p><h2>Downstream Consumers</h2></div></div>
+  {{if .HasDownstream}}
+  <div class="table-wrap embedded">
+    <table>
+      <thead>
+        <tr>
+          <th>Module</th>
+          <th>Latest Version</th>
+          <th>Dependency Sources</th>
+          <th>Reasons</th>
+          <th>Action</th>
+        </tr>
+      </thead>
+      <tbody>
+        {{range .Downstream}}
+        <tr>
+          <td><a href="{{.ModuleURL}}">{{.Module}}</a></td>
+          <td>{{if .Version}}<span class="code-inline">{{.Version}}</span>{{else}}<span class="muted">Unknown</span>{{end}}</td>
+          <td>{{if .DependencySources}}{{.DependencySources}}{{else}}<span class="muted">None</span>{{end}}</td>
+          <td>{{if .Reasons}}{{.Reasons}}{{else}}<span class="muted">None</span>{{end}}</td>
+          <td><a href="{{.ModuleURL}}">Consumer details</a></td>
+        </tr>
+        {{end}}
+      </tbody>
+    </table>
+  </div>
+  {{else}}
+  <section class="empty-state compact"><div class="empty-icon" aria-hidden="true">DN</div><div><h2>No downstream consumers.</h2><p>No downstream modules are currently known to depend on this module.</p></div></section>
+  {{end}}
+</section>
+<section class="card">
+  <div class="section-heading"><div><p class="eyebrow">Upstream</p><h2>Upstream Dependencies</h2></div></div>
+  {{if .HasUpstream}}
+  <div class="table-wrap embedded">
+    <table>
+      <thead>
+        <tr>
+          <th>Module</th>
+          <th>Version</th>
+          <th>Dependency Sources</th>
+          <th>Reasons</th>
+          <th>Action</th>
+        </tr>
+      </thead>
+      <tbody>
+        {{range .Upstream}}
+        <tr>
+          <td><a href="{{.ModuleURL}}">{{.Module}}</a></td>
+          <td>{{if .Version}}<span class="code-inline">{{.Version}}</span>{{else}}<span class="muted">Unknown</span>{{end}}</td>
+          <td>{{if .DependencySources}}{{.DependencySources}}{{else}}<span class="muted">None</span>{{end}}</td>
+          <td>{{if .Reasons}}{{.Reasons}}{{else}}<span class="muted">None</span>{{end}}</td>
+          <td><a href="{{.ModuleURL}}">Provider details</a></td>
+        </tr>
+        {{end}}
+      </tbody>
+    </table>
+  </div>
+  {{else}}
+  <section class="empty-state compact"><div class="empty-icon" aria-hidden="true">UP</div><div><h2>No upstream dependencies.</h2><p>No upstream dependencies are currently known for this module.</p></div></section>
+  {{end}}
+</section>
+<section class="card">
+  <div class="section-heading"><div><p class="eyebrow">Unresolved</p><h2>Unresolved Dependencies</h2></div></div>
+  {{if .HasUnresolved}}
+  <div class="table-wrap embedded">
+    <table>
+      <thead>
+        <tr>
+          <th>Source</th>
+          <th>Import Path</th>
+          <th>Referenced Symbol</th>
+          <th>Reason</th>
+        </tr>
+      </thead>
+      <tbody>
+        {{range .Unresolved}}
+        <tr>
+          <td>{{if .Source}}<span class="code-inline">{{.Source}}</span>{{else}}<span class="muted">Unknown</span>{{end}}</td>
+          <td>{{if .ImportPath}}<span class="code-inline">{{.ImportPath}}</span>{{else}}<span class="muted">None</span>{{end}}</td>
+          <td>{{if .ReferencedSymbol}}<span class="code-inline">{{.ReferencedSymbol}}</span>{{else}}<span class="muted">None</span>{{end}}</td>
+          <td>{{if .Reason}}{{.Reason}}{{else}}<span class="muted">Unknown</span>{{end}}</td>
+        </tr>
+        {{end}}
+      </tbody>
+    </table>
+  </div>
+  {{else}}
+  <section class="empty-state compact"><div class="empty-icon" aria-hidden="true">UN</div><div><h2>No unresolved dependencies.</h2><p>All known imports and type references resolved to published provider modules.</p></div></section>
+  {{end}}
+</section>
+{{end}}
+{{template "footer" .}}

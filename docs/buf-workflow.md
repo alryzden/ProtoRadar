@@ -1,6 +1,6 @@
 # Buf-Compatible Workflow
 
-ProtoRadar Phase 2 turns published protobuf module versions into Buf-compatible governance inputs. A publish request uploads a source archive, the server validates it with Buf, stores both source and descriptor artifacts, extracts descriptor metadata, and writes the publish event through the transactional outbox.
+ProtoRadar turns published protobuf module versions into Buf-compatible governance inputs. A publish request uploads a source archive, the server validates it with Buf, stores both source and descriptor artifacts, extracts descriptor metadata, and writes the publish event through the transactional outbox. Phase 3 reuses the stored Buf image artifact as the baseline for breaking-change checks.
 
 ## Publish Requirements
 
@@ -40,6 +40,12 @@ Configure lint behavior with `buf.lint_mode` / `PROTORADAR_BUF_LINT_MODE`:
 
 Captured Buf output is limited by `buf.max_report_bytes` / `PROTORADAR_BUF_MAX_REPORT_BYTES`.
 
+Breaking-check report capture and storage limits are configured separately:
+
+- `breaking.max_report_bytes` / `PROTORADAR_BREAKING_MAX_REPORT_BYTES`;
+- `breaking.max_changes` / `PROTORADAR_BREAKING_MAX_CHANGES`;
+- `breaking.default_against` / `PROTORADAR_BREAKING_DEFAULT_AGAINST`.
+
 ## Stored Artifacts
 
 Each module version stores multiple artifact records:
@@ -77,14 +83,26 @@ curl -sS \
   http://localhost:8080/api/v1/modules/user-api/versions/v1.1.0/metadata
 ```
 
+## Breaking Checks
+
+Breaking checks compare a proposed workspace against the stored `buf_image` artifact from a previously published version. The proposed workspace is validated server-side, and `buf breaking` runs in the infrastructure Buf adapter.
+
+See [Breaking Checks](breaking-checks.md) for CLI usage, REST endpoints, report structure, exit codes, and known limitations.
+
 ## Transactional Outbox
 
 `ModuleVersionPublished` is written inside the same PostgreSQL transaction as the module version, artifact metadata, Buf config metadata, and descriptor metadata records. Usecases do not publish directly to Kafka, Sarama, or any broker.
 
 The event payload includes source and Buf image artifact checksums/sizes, Buf config presence, Buf lock presence, lint status, and descriptor metadata summary counts. Raw API tokens are not included in events.
 
+`BreakingReportCreated` is written inside the same PostgreSQL transaction as the breaking report and its changes. Breaking changes are normal check results, not internal failures.
+
+`ModuleDependenciesUpdated` is written inside the same publish transaction as dependency graph records for the published module version.
+
 ## Known Limitations
 
-- Breaking-change comparison is not implemented yet.
-- Dependency graph UI is not implemented yet.
+- Dependency graph analysis is direct-only; transitive traversal is not implemented yet.
+- Approval and waiver workflows are not implemented yet.
+- Breaking diagnostic parsing is best-effort.
+- Runtime usage and generated-client usage are not modeled yet.
 - Generated SDK workflows are not implemented yet.

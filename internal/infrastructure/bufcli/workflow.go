@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -98,6 +99,74 @@ func (workflow *Workflow) Inspect(ctx context.Context, workdir string, options r
 		BufImageDigest:     "sha256:" + hex.EncodeToString(sum[:]),
 		LintResult:         lintResult,
 		DescriptorMetadata: metadata,
+	}, nil
+}
+
+func (workflow *Workflow) CheckBreaking(ctx context.Context, input registry.BufBreakingCheckInput) (registry.BufBreakingCheckResult, error) {
+	if len(input.BaselineImage) == 0 {
+		return registry.BufBreakingCheckResult{Status: domain.BreakingReportStatusFailed}, fmt.Errorf("baseline image is required")
+	}
+
+	baselineFile, err := os.CreateTemp("", "protoradar-baseline-*.binpb")
+	if err != nil {
+		return registry.BufBreakingCheckResult{Status: domain.BreakingReportStatusFailed}, err
+	}
+	baselinePath := baselineFile.Name()
+	defer os.Remove(baselinePath)
+	if _, err := baselineFile.Write(input.BaselineImage); err != nil {
+		_ = baselineFile.Close()
+		return registry.BufBreakingCheckResult{Status: domain.BreakingReportStatusFailed}, err
+	}
+	if err := baselineFile.Close(); err != nil {
+		return registry.BufBreakingCheckResult{Status: domain.BreakingReportStatusFailed}, err
+	}
+
+	result, err := workflow.runCommand(ctx, commandSpec{
+		path:        workflow.cfg.BinaryPath,
+		args:        []string{"breaking", input.Workdir, "--against", baselinePath},
+		dir:         input.Workdir,
+		timeout:     workflow.cfg.BuildTimeout,
+		stdoutLimit: workflow.cfg.MaxReportBytes,
+		stderrLimit: workflow.cfg.MaxReportBytes,
+	})
+	if err != nil {
+		rawOutput := truncateReport(err.Error(), workflow.cfg.MaxReportBytes)
+		return registry.BufBreakingCheckResult{
+			Status:       domain.BreakingReportStatusFailed,
+			RawOutput:    rawOutput,
+			HumanSummary: "Buf breaking check failed.",
+		}, err
+	}
+
+	rawOutput := truncateReport(result.report(), workflow.cfg.MaxReportBytes)
+	if result.exitCode == 0 {
+		return registry.BufBreakingCheckResult{
+			Status:       domain.BreakingReportStatusPassed,
+			RawOutput:    rawOutput,
+			HumanSummary: "No breaking changes found.",
+		}, nil
+	}
+	if strings.TrimSpace(rawOutput) == "" {
+		return registry.BufBreakingCheckResult{
+			Status:       domain.BreakingReportStatusFailed,
+			RawOutput:    rawOutput,
+			HumanSummary: "Buf breaking check failed without diagnostics.",
+		}, fmt.Errorf("buf breaking failed without diagnostics")
+	}
+
+	changes := parseBreakingDiagnostics(rawOutput)
+	if len(changes) == 0 {
+		return registry.BufBreakingCheckResult{
+			Status:       domain.BreakingReportStatusFailed,
+			RawOutput:    rawOutput,
+			HumanSummary: "Buf breaking check failed.",
+		}, fmt.Errorf("buf breaking failed: %s", rawOutput)
+	}
+	return registry.BufBreakingCheckResult{
+		Status:       domain.BreakingReportStatusBreaking,
+		Changes:      changes,
+		RawOutput:    rawOutput,
+		HumanSummary: breakingSummary(len(changes)),
 	}, nil
 }
 
@@ -204,6 +273,103 @@ func truncateReport(report string, limit int) string {
 	return report[:limit]
 }
 
+var breakingRulePattern = regexp.MustCompile(`\b[A-Z][A-Z0-9]+(?:_[A-Z0-9]+)+\b`)
+
+func parseBreakingDiagnostics(report string) []domain.BreakingChange {
+	lines := strings.Split(report, "\n")
+	changes := make([]domain.BreakingChange, 0)
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if !looksLikeBreakingDiagnostic(line) {
+			continue
+		}
+		changes = append(changes, parseBreakingDiagnosticLine(line))
+	}
+	return changes
+}
+
+func looksLikeBreakingDiagnostic(line string) bool {
+	return strings.Contains(line, ".proto") || breakingRulePattern.MatchString(line) || strings.Contains(strings.ToLower(line), "breaking")
+}
+
+func parseBreakingDiagnosticLine(line string) domain.BreakingChange {
+	filePath := extractProtoPath(line)
+	ruleID := breakingRulePattern.FindString(line)
+	message := cleanBreakingMessage(line, filePath, ruleID)
+	return domain.BreakingChange{
+		Category: inferBreakingCategory(ruleID, message),
+		FilePath: filePath,
+		RuleID:   ruleID,
+		Message:  message,
+		Severity: "error",
+	}
+}
+
+func extractProtoPath(line string) string {
+	for _, field := range strings.FieldsFunc(line, func(r rune) bool {
+		return r == ':' || r == ' ' || r == '\t'
+	}) {
+		field = strings.Trim(field, `"'(),`)
+		if strings.HasSuffix(field, ".proto") || strings.Contains(field, ".proto/") {
+			if index := strings.Index(field, ".proto"); index >= 0 {
+				return field[:index+len(".proto")]
+			}
+		}
+	}
+	return ""
+}
+
+func cleanBreakingMessage(line string, filePath string, ruleID string) string {
+	message := strings.TrimSpace(line)
+	if filePath != "" {
+		message = strings.TrimSpace(strings.TrimPrefix(message, filePath))
+		message = strings.TrimLeft(message, ": ")
+	}
+	message = strings.TrimSpace(strings.TrimPrefix(message, ruleID))
+	message = strings.TrimLeft(message, ": ")
+	if ruleID != "" {
+		message = strings.ReplaceAll(message, "("+ruleID+")", "")
+		message = strings.ReplaceAll(message, "["+ruleID+"]", "")
+	}
+	message = strings.TrimSpace(message)
+	if message == "" {
+		return line
+	}
+	return message
+}
+
+func inferBreakingCategory(ruleID string, message string) string {
+	text := strings.ToLower(ruleID + " " + message)
+	switch {
+	case strings.Contains(text, "field"):
+		return "field"
+	case strings.Contains(text, "rpc") || strings.Contains(text, "method"):
+		return "method"
+	case strings.Contains(text, "service"):
+		return "service"
+	case strings.Contains(text, "message"):
+		return "message"
+	case strings.Contains(text, "enum"):
+		return "enum"
+	case strings.Contains(text, "package"):
+		return "package"
+	case strings.Contains(text, "file"):
+		return "file"
+	default:
+		return ""
+	}
+}
+
+func breakingSummary(changeCount int) string {
+	if changeCount == 1 {
+		return "1 breaking change found."
+	}
+	return fmt.Sprintf("%d breaking changes found.", changeCount)
+}
+
 type commandSpec struct {
 	path        string
 	args        []string
@@ -289,3 +455,4 @@ func (buffer *commandBuffer) Bytes() []byte {
 }
 
 var _ registry.BufWorkflow = (*Workflow)(nil)
+var _ registry.BufBreakingChecker = (*Workflow)(nil)
