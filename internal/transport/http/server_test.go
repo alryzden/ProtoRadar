@@ -20,6 +20,7 @@ import (
 	"github.com/alryzden/ProtoRadar/internal/domain"
 	"github.com/alryzden/ProtoRadar/internal/storage"
 	"github.com/alryzden/ProtoRadar/internal/usecase/registry"
+	"github.com/alryzden/ProtoRadar/internal/usecase/runtimeinventory"
 )
 
 func TestUnauthorizedWithoutToken(t *testing.T) {
@@ -29,6 +30,27 @@ func TestUnauthorizedWithoutToken(t *testing.T) {
 	if res.Code != http.StatusUnauthorized {
 		t.Fatalf("status = %d, want %d", res.Code, http.StatusUnauthorized)
 	}
+	assertAPIError(t, res, "unauthorized")
+}
+
+func TestValidationErrorResponseFormat(t *testing.T) {
+	server := newTestServer()
+
+	res := request(t, server, http.MethodPost, "/api/v1/modules", strings.NewReader(`{"name":"bad name"}`), "Bearer valid", "application/json")
+	if res.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", res.Code, http.StatusBadRequest)
+	}
+	assertAPIError(t, res, "validation_error")
+}
+
+func TestNotFoundErrorResponseFormat(t *testing.T) {
+	server := newTestServer()
+
+	res := request(t, server, http.MethodGet, "/api/v1/modules/missing-api", nil, "Bearer valid", "")
+	if res.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want %d", res.Code, http.StatusNotFound)
+	}
+	assertAPIError(t, res, "not_found")
 }
 
 func TestHealthAndReadinessArePublic(t *testing.T) {
@@ -43,9 +65,19 @@ func TestHealthAndReadinessArePublic(t *testing.T) {
 	if health.Code != http.StatusOK {
 		t.Fatalf("health status = %d", health.Code)
 	}
+	var healthBody map[string]string
+	decodeResponse(t, health, &healthBody)
+	if healthBody["status"] != "ok" {
+		t.Fatalf("health body = %#v", healthBody)
+	}
 	ready := request(t, server, http.MethodGet, "/readyz", nil, "", "")
 	if ready.Code != http.StatusOK {
 		t.Fatalf("ready status = %d", ready.Code)
+	}
+	var readyBody readinessResponse
+	decodeResponse(t, ready, &readyBody)
+	if readyBody.Status != "ok" || readyBody.Checks["database"] != "ok" {
+		t.Fatalf("ready body = %#v", readyBody)
 	}
 }
 
@@ -60,6 +92,102 @@ func TestReadinessFailure(t *testing.T) {
 	res := request(t, server, http.MethodGet, "/readyz", nil, "", "")
 	if res.Code != http.StatusServiceUnavailable {
 		t.Fatalf("status = %d, want %d", res.Code, http.StatusServiceUnavailable)
+	}
+	var body readinessResponse
+	decodeResponse(t, res, &body)
+	if body.Status != "error" || body.Checks["database"] != "error" {
+		t.Fatalf("body = %#v", body)
+	}
+	if strings.Contains(res.Body.String(), "database unavailable") {
+		t.Fatalf("readiness leaked dependency error: %s", res.Body.String())
+	}
+}
+
+func TestMetricsEndpointReturnsPrometheusText(t *testing.T) {
+	server := NewServer(newFakeRegistry(), Options{
+		BootstrapToken: "bootstrap",
+		Metrics:        NewMetrics(),
+	}).Handler()
+
+	request(t, server, http.MethodGet, "/healthz", nil, "", "")
+	res := request(t, server, http.MethodGet, "/metrics", nil, "", "")
+	if res.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", res.Code, http.StatusOK)
+	}
+	if !strings.Contains(res.Header().Get("Content-Type"), "text/plain") {
+		t.Fatalf("content type = %q", res.Header().Get("Content-Type"))
+	}
+	body := res.Body.String()
+	if !strings.Contains(body, "protoradar_http_requests_total") || !strings.Contains(body, "protoradar_http_in_flight_requests") {
+		t.Fatalf("metrics body missing expected series:\n%s", body)
+	}
+}
+
+func TestRequestIDGeneratedWhenMissing(t *testing.T) {
+	server := newTestServer()
+
+	res := request(t, server, http.MethodGet, "/healthz", nil, "", "")
+	if res.Header().Get(requestIDHeader) == "" {
+		t.Fatalf("missing %s response header", requestIDHeader)
+	}
+}
+
+func TestRequestIDPropagatedWhenProvided(t *testing.T) {
+	server := newTestServer()
+
+	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	req.Header.Set(requestIDHeader, "request-123")
+	res := httptest.NewRecorder()
+	server.ServeHTTP(res, req)
+	if res.Header().Get(requestIDHeader) != "request-123" {
+		t.Fatalf("request id = %q", res.Header().Get(requestIDHeader))
+	}
+}
+
+func TestRequestLogsContainRequestIDAndRedactAuthorization(t *testing.T) {
+	var logs bytes.Buffer
+	logger, err := NewLogger("info", "json", &logs)
+	if err != nil {
+		t.Fatalf("new logger: %v", err)
+	}
+	server := NewServer(newFakeRegistry(), Options{
+		BootstrapToken: "bootstrap",
+		Logger:         logger,
+	}).Handler()
+
+	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	req.Header.Set(requestIDHeader, "request-123")
+	req.Header.Set("Authorization", "Bearer secret-token")
+	res := httptest.NewRecorder()
+	server.ServeHTTP(res, req)
+
+	body := logs.String()
+	if !strings.Contains(body, `"request_id":"request-123"`) {
+		t.Fatalf("log missing request id: %s", body)
+	}
+	if strings.Contains(body, "secret-token") || strings.Contains(body, "Authorization") {
+		t.Fatalf("log leaked authorization data: %s", body)
+	}
+}
+
+func TestMetricsUseRouteTemplateNotRawPath(t *testing.T) {
+	fake := newFakeRegistry()
+	server := NewServer(fake, Options{
+		BootstrapToken: "bootstrap",
+		Metrics:        NewMetrics(),
+	}).Handler()
+	createHTTPModule(t, server, "user-api")
+
+	res := request(t, server, http.MethodGet, "/api/v1/modules/user-api", nil, "Bearer valid", "")
+	if res.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", res.Code, res.Body.String())
+	}
+	metrics := request(t, server, http.MethodGet, "/metrics", nil, "", "").Body.String()
+	if !strings.Contains(metrics, `route="/api/v1/modules/{module}"`) {
+		t.Fatalf("metrics missing route template:\n%s", metrics)
+	}
+	if strings.Contains(metrics, "user-api") {
+		t.Fatalf("metrics leaked raw path label:\n%s", metrics)
 	}
 }
 
@@ -102,6 +230,7 @@ func TestPostModulesDuplicateMapsToConflict(t *testing.T) {
 	if res.Code != http.StatusConflict {
 		t.Fatalf("status = %d, want %d", res.Code, http.StatusConflict)
 	}
+	assertAPIError(t, res, "conflict")
 }
 
 func TestGetModulesReturnsList(t *testing.T) {
@@ -479,6 +608,254 @@ func TestDependencyGraphInternalErrorDoesNotExposeStackTrace(t *testing.T) {
 	}
 }
 
+func TestRuntimeReportUnauthorizedReturnsUnauthorized(t *testing.T) {
+	server := newRuntimeTestServer()
+
+	res := request(t, server, http.MethodPost, "/api/v1/runtime/reports", strings.NewReader(`{}`), "", "application/json")
+	if res.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want %d", res.Code, http.StatusUnauthorized)
+	}
+}
+
+func TestPostRuntimeReportSuccess(t *testing.T) {
+	fake := newFakeRegistry()
+	server := newRuntimeTestServerWithFake(fake)
+	user := createHTTPModule(t, server, "user-api")
+	fake.addVersion(t, user, "v1.2.0")
+
+	res := request(t, server, http.MethodPost, "/api/v1/runtime/reports", strings.NewReader(`{
+		"service_name": "billing-service",
+		"environment": "production",
+		"git_commit": "abc1234",
+		"build_version": "2026.06.04-15",
+		"modules": [{"module": "user-api", "version": "v1.2.0"}]
+	}`), "Bearer valid", "application/json")
+	if res.Code != http.StatusCreated {
+		t.Fatalf("status = %d, body = %s", res.Code, res.Body.String())
+	}
+
+	var body reportRuntimeInventoryDTO
+	decodeResponse(t, res, &body)
+	if body.DeploymentID == "" || body.ServiceName != "billing-service" || body.Environment != "production" {
+		t.Fatalf("body = %#v", body)
+	}
+	if len(body.Usages) != 1 || body.Usages[0].Module != "user-api" || body.Usages[0].DriftStatus != "up_to_date" {
+		t.Fatalf("usages = %#v", body.Usages)
+	}
+}
+
+func TestPostRuntimeReportInvalidJSONReturnsBadRequest(t *testing.T) {
+	server := newRuntimeTestServer()
+
+	res := request(t, server, http.MethodPost, "/api/v1/runtime/reports", strings.NewReader(`{bad json`), "Bearer valid", "application/json")
+	if res.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", res.Code, http.StatusBadRequest)
+	}
+}
+
+func TestPostRuntimeReportOversizedBodyReturnsPayloadTooLarge(t *testing.T) {
+	fake := newFakeRegistry()
+	server := NewServer(fake, Options{
+		BootstrapToken:      "bootstrap",
+		Runtime:             fake,
+		MaxRequestBodyBytes: 8,
+	}).Handler()
+
+	res := request(t, server, http.MethodPost, "/api/v1/runtime/reports", strings.NewReader(`{"service_name":"billing-service"}`), "Bearer valid", "application/json")
+	if res.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want %d", res.Code, http.StatusRequestEntityTooLarge)
+	}
+	assertAPIError(t, res, "payload_too_large")
+}
+
+func TestPostRuntimeReportMissingFieldsReturnBadRequest(t *testing.T) {
+	server := newRuntimeTestServer()
+	cases := []struct {
+		name string
+		body string
+	}{
+		{name: "missing service", body: `{"environment":"production","git_commit":"abc123","build_version":"build-1","modules":[{"module":"user-api","version":"v1.0.0"}]}`},
+		{name: "missing environment", body: `{"service_name":"billing-service","git_commit":"abc123","build_version":"build-1","modules":[{"module":"user-api","version":"v1.0.0"}]}`},
+		{name: "empty modules", body: `{"service_name":"billing-service","environment":"production","git_commit":"abc123","build_version":"build-1","modules":[]}`},
+	}
+	for _, tc := range cases {
+		res := request(t, server, http.MethodPost, "/api/v1/runtime/reports", strings.NewReader(tc.body), "Bearer valid", "application/json")
+		if res.Code != http.StatusBadRequest {
+			t.Fatalf("%s status = %d, want %d, body = %s", tc.name, res.Code, http.StatusBadRequest, res.Body.String())
+		}
+	}
+}
+
+func TestPostRuntimeReportUnknownModuleUsageSucceeds(t *testing.T) {
+	server := newRuntimeTestServer()
+
+	res := request(t, server, http.MethodPost, "/api/v1/runtime/reports", strings.NewReader(`{
+		"service_name": "billing-service",
+		"environment": "production",
+		"git_commit": "abc1234",
+		"build_version": "build-1",
+		"modules": [{"module": "missing-api", "version": "v1.0.0"}]
+	}`), "Bearer valid", "application/json")
+	if res.Code != http.StatusCreated {
+		t.Fatalf("status = %d, body = %s", res.Code, res.Body.String())
+	}
+	var body reportRuntimeInventoryDTO
+	decodeResponse(t, res, &body)
+	if len(body.Usages) != 1 || body.Usages[0].DriftStatus != "unknown_version" || body.Usages[0].DriftReason != "module_not_found" {
+		t.Fatalf("usages = %#v", body.Usages)
+	}
+}
+
+func TestPostRuntimeReportBehindLatestReturnsDriftStatus(t *testing.T) {
+	fake := newFakeRegistry()
+	server := newRuntimeTestServerWithFake(fake)
+	user := createHTTPModule(t, server, "user-api")
+	fake.addVersion(t, user, "v1.2.0")
+	fake.now = fake.now.Add(time.Hour)
+	fake.addVersion(t, user, "v1.5.0")
+
+	res := request(t, server, http.MethodPost, "/api/v1/runtime/reports", strings.NewReader(`{
+		"service_name": "billing-service",
+		"environment": "production",
+		"git_commit": "abc1234",
+		"build_version": "build-1",
+		"modules": [{"module": "user-api", "version": "v1.2.0"}]
+	}`), "Bearer valid", "application/json")
+	if res.Code != http.StatusCreated {
+		t.Fatalf("status = %d, body = %s", res.Code, res.Body.String())
+	}
+	var body reportRuntimeInventoryDTO
+	decodeResponse(t, res, &body)
+	if len(body.Usages) != 1 || body.Usages[0].DriftStatus != "behind_latest" || body.Usages[0].LatestVersion != "v1.5.0" {
+		t.Fatalf("usages = %#v", body.Usages)
+	}
+}
+
+func TestGetRuntimeServicesReturnsSummaries(t *testing.T) {
+	fake := newFakeRegistry()
+	server := newRuntimeTestServerWithFake(fake)
+	fake.seedRuntimeServiceSummary(t, "billing-service", "production")
+
+	res := request(t, server, http.MethodGet, "/api/v1/runtime/services", nil, "Bearer valid", "")
+	if res.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", res.Code, res.Body.String())
+	}
+	var body listRuntimeServicesResponse
+	decodeResponse(t, res, &body)
+	if len(body.Services) != 1 || body.Services[0].ServiceName != "billing-service" || !slices.Contains(body.Services[0].Environments, "production") {
+		t.Fatalf("body = %#v", body)
+	}
+}
+
+func TestGetRuntimeServiceDetailsReturnsDeploymentsAndUsages(t *testing.T) {
+	fake := newFakeRegistry()
+	server := newRuntimeTestServerWithFake(fake)
+	fake.seedRuntimeDeployment(t, "billing-service", "production", "user-api", "v1.2.0")
+
+	res := request(t, server, http.MethodGet, "/api/v1/runtime/services/billing-service", nil, "Bearer valid", "")
+	if res.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", res.Code, res.Body.String())
+	}
+	var body runtimeServiceDetailsDTO
+	decodeResponse(t, res, &body)
+	if body.ServiceName != "billing-service" || len(body.Deployments) != 1 || len(body.Usages) != 1 {
+		t.Fatalf("body = %#v", body)
+	}
+}
+
+func TestGetRuntimeServiceDetailsUnknownServiceReturnsNotFound(t *testing.T) {
+	server := newRuntimeTestServer()
+
+	res := request(t, server, http.MethodGet, "/api/v1/runtime/services/missing-service", nil, "Bearer valid", "")
+	if res.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want %d", res.Code, http.StatusNotFound)
+	}
+}
+
+func TestGetRuntimeEnvironmentInventoryReturnsInventory(t *testing.T) {
+	fake := newFakeRegistry()
+	server := newRuntimeTestServerWithFake(fake)
+	fake.seedRuntimeDeployment(t, "billing-service", "production", "user-api", "v1.2.0")
+
+	res := request(t, server, http.MethodGet, "/api/v1/runtime/environments/production", nil, "Bearer valid", "")
+	if res.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", res.Code, res.Body.String())
+	}
+	var body runtimeEnvironmentInventoryDTO
+	decodeResponse(t, res, &body)
+	if body.Environment != "production" || len(body.Deployments) != 1 || len(body.Usages) != 1 {
+		t.Fatalf("body = %#v", body)
+	}
+}
+
+func TestGetModuleRuntimeUsagesReturnsUsages(t *testing.T) {
+	fake := newFakeRegistry()
+	server := newRuntimeTestServerWithFake(fake)
+	createHTTPModule(t, server, "user-api")
+	fake.seedRuntimeDeployment(t, "billing-service", "production", "user-api", "v1.2.0")
+
+	res := request(t, server, http.MethodGet, "/api/v1/modules/user-api/runtime-usages", nil, "Bearer valid", "")
+	if res.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", res.Code, res.Body.String())
+	}
+	var body moduleRuntimeUsagesDTO
+	decodeResponse(t, res, &body)
+	if body.Module != "user-api" || len(body.Usages) != 1 || body.Usages[0].ServiceName != "billing-service" {
+		t.Fatalf("body = %#v", body)
+	}
+}
+
+func TestGetBreakingReportRuntimeImpactReturnsImpacts(t *testing.T) {
+	fake := newFakeRegistry()
+	server := newRuntimeTestServerWithFake(fake)
+	user := createHTTPModule(t, server, "user-api")
+	version := fake.addVersion(t, user, "v1.2.0")
+	report := domain.BreakingReport{
+		ID:            domain.NewBreakingReportID("report-1"),
+		ModuleID:      user.ID,
+		ModuleName:    user.Name,
+		BaseVersionID: version.ID,
+		BaseVersion:   version.Version,
+		Status:        domain.BreakingReportStatusBreaking,
+		CreatedAt:     fake.now,
+	}
+	fake.reports[report.ID.String()] = registry.CheckBreakingResponse{Report: report}
+	fake.seedRuntimeDeployment(t, "billing-service", "production", "user-api", "v1.2.0")
+
+	res := request(t, server, http.MethodGet, "/api/v1/breaking-reports/report-1/runtime-impact", nil, "Bearer valid", "")
+	if res.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", res.Code, res.Body.String())
+	}
+	var body breakingReportRuntimeImpactDTO
+	decodeResponse(t, res, &body)
+	if body.ReportID != "report-1" || len(body.Impacts) != 1 || body.Impacts[0].ImpactStatus != "potentially_affected_by_breaking_change" {
+		t.Fatalf("body = %#v", body)
+	}
+}
+
+func TestGetBreakingReportRuntimeImpactUnknownReportReturnsNotFound(t *testing.T) {
+	server := newRuntimeTestServer()
+
+	res := request(t, server, http.MethodGet, "/api/v1/breaking-reports/missing/runtime-impact", nil, "Bearer valid", "")
+	if res.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want %d", res.Code, http.StatusNotFound)
+	}
+}
+
+func TestRuntimeInternalErrorDoesNotExposeStackTrace(t *testing.T) {
+	fake := newFakeRegistry()
+	fake.runtimeErr = errors.New("runtime failed\nstack trace: secret.go:42")
+	server := newRuntimeTestServerWithFake(fake)
+
+	res := request(t, server, http.MethodGet, "/api/v1/runtime/services", nil, "Bearer valid", "")
+	if res.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want %d", res.Code, http.StatusInternalServerError)
+	}
+	if strings.Contains(res.Body.String(), "stack trace") || strings.Contains(res.Body.String(), "secret.go") {
+		t.Fatalf("error response leaked internals: %s", res.Body.String())
+	}
+}
+
 func TestPublishModuleVersion(t *testing.T) {
 	server := newTestServer()
 	request(t, server, http.MethodPost, "/api/v1/modules", strings.NewReader(`{"name":"user-api"}`), "Bearer valid", "application/json")
@@ -585,6 +962,22 @@ func TestPublishArtifactTooLargeMapsToPayloadTooLarge(t *testing.T) {
 	if res.Code != http.StatusRequestEntityTooLarge {
 		t.Fatalf("status = %d, want %d", res.Code, http.StatusRequestEntityTooLarge)
 	}
+}
+
+func TestPublishOversizedRequestBodyMapsToPayloadTooLarge(t *testing.T) {
+	fake := newFakeRegistry()
+	server := NewServer(fake, Options{
+		BootstrapToken:      "bootstrap",
+		Runtime:             fake,
+		MaxRequestBodyBytes: 16,
+	}).Handler()
+	createHTTPModule(t, server, "user-api")
+
+	res := multipartRequest(t, server, "/api/v1/modules/user-api/versions", "v1.0.0", []byte("artifact"))
+	if res.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want %d", res.Code, http.StatusRequestEntityTooLarge)
+	}
+	assertAPIError(t, res, "payload_too_large")
 }
 
 func TestGetModuleVersionIncludesArtifactsAndMetadataSummary(t *testing.T) {
@@ -843,21 +1236,30 @@ func TestTokenEndpointDoesNotReturnTokenHash(t *testing.T) {
 }
 
 func newTestServer() http.Handler {
-	return NewServer(newFakeRegistry(), Options{BootstrapToken: "bootstrap"}).Handler()
+	fake := newFakeRegistry()
+	return NewServer(fake, Options{BootstrapToken: "bootstrap", Runtime: fake}).Handler()
 }
 
 func newServerWithPublishError(err error) http.Handler {
 	fake := newFakeRegistry()
 	fake.publishErr = err
 	_, _ = fake.CreateModule(context.Background(), registry.CreateModuleRequest{Name: "user-api"})
-	return NewServer(fake, Options{BootstrapToken: "bootstrap"}).Handler()
+	return NewServer(fake, Options{BootstrapToken: "bootstrap", Runtime: fake}).Handler()
 }
 
 func newServerWithCheckError(err error) http.Handler {
 	fake := newFakeRegistry()
 	fake.checkErr = err
 	_, _ = fake.CreateModule(context.Background(), registry.CreateModuleRequest{Name: "user-api"})
-	return NewServer(fake, Options{BootstrapToken: "bootstrap"}).Handler()
+	return NewServer(fake, Options{BootstrapToken: "bootstrap", Runtime: fake}).Handler()
+}
+
+func newRuntimeTestServer() http.Handler {
+	return newRuntimeTestServerWithFake(newFakeRegistry())
+}
+
+func newRuntimeTestServerWithFake(fake *fakeRegistry) http.Handler {
+	return NewServer(fake, Options{BootstrapToken: "bootstrap", Runtime: fake}).Handler()
 }
 
 func request(t *testing.T, handler http.Handler, method string, path string, body io.Reader, auth string, contentType string) *httptest.ResponseRecorder {
@@ -931,6 +1333,23 @@ func decodeResponse(t *testing.T, res *httptest.ResponseRecorder, dst any) {
 	}
 }
 
+func assertAPIError(t *testing.T, res *httptest.ResponseRecorder, wantCode string) {
+	t.Helper()
+	var body errorResponse
+	decodeResponse(t, res, &body)
+	if body.Error.Code != wantCode {
+		t.Fatalf("error code = %q, want %q; body = %#v", body.Error.Code, wantCode, body)
+	}
+	if strings.TrimSpace(body.Error.Message) == "" {
+		t.Fatalf("error message is empty: %#v", body)
+	}
+	for _, forbidden := range []string{"stack trace", "secret.go", "panic:", "pq:", "SQLSTATE"} {
+		if strings.Contains(body.Error.Message, forbidden) {
+			t.Fatalf("error message leaked %q: %#v", forbidden, body)
+		}
+	}
+}
+
 func createHTTPModule(t *testing.T, handler http.Handler, name string) domain.Module {
 	t.Helper()
 	res := request(t, handler, http.MethodPost, "/api/v1/modules", strings.NewReader(`{"name":"`+name+`"}`), "Bearer valid", "application/json")
@@ -1001,41 +1420,46 @@ func testUnresolved(module domain.Module, moduleVersion domain.ModuleVersion, im
 }
 
 type fakeRegistry struct {
-	now             time.Time
-	modules         map[string]domain.Module
-	versions        map[string]domain.ModuleVersion
-	artifacts       map[string][]domain.Artifact
-	objects         map[string][]byte
-	bufConfigs      map[string]domain.BufConfigInfo
-	lintResults     map[string]domain.BufLintResult
-	metadata        map[string]domain.DescriptorMetadata
-	reports         map[string]registry.CheckBreakingResponse
-	gitLabProjects  map[string]domain.ModuleGitLabProject
-	dependencies    []domain.ModuleDependency
-	unresolved      []domain.UnresolvedProtoDependency
-	dependencyErr   error
-	publishErr      error
-	linkGitLabErr   error
-	publishLint     domain.BufLintResult
-	checkErr        error
-	breakingStatus  domain.BreakingReportStatus
-	breakingChanges []domain.BreakingChange
+	now                time.Time
+	modules            map[string]domain.Module
+	versions           map[string]domain.ModuleVersion
+	artifacts          map[string][]domain.Artifact
+	objects            map[string][]byte
+	bufConfigs         map[string]domain.BufConfigInfo
+	lintResults        map[string]domain.BufLintResult
+	metadata           map[string]domain.DescriptorMetadata
+	reports            map[string]registry.CheckBreakingResponse
+	gitLabProjects     map[string]domain.ModuleGitLabProject
+	dependencies       []domain.ModuleDependency
+	unresolved         []domain.UnresolvedProtoDependency
+	runtimeServices    map[string]domain.RuntimeService
+	runtimeDeployments []domain.RuntimeDeployment
+	runtimeUsages      []domain.RuntimeModuleUsage
+	dependencyErr      error
+	runtimeErr         error
+	publishErr         error
+	linkGitLabErr      error
+	publishLint        domain.BufLintResult
+	checkErr           error
+	breakingStatus     domain.BreakingReportStatus
+	breakingChanges    []domain.BreakingChange
 }
 
 func newFakeRegistry() *fakeRegistry {
 	return &fakeRegistry{
-		now:            time.Date(2026, 6, 4, 12, 0, 0, 0, time.UTC),
-		modules:        map[string]domain.Module{},
-		versions:       map[string]domain.ModuleVersion{},
-		artifacts:      map[string][]domain.Artifact{},
-		objects:        map[string][]byte{},
-		bufConfigs:     map[string]domain.BufConfigInfo{},
-		lintResults:    map[string]domain.BufLintResult{},
-		metadata:       map[string]domain.DescriptorMetadata{},
-		reports:        map[string]registry.CheckBreakingResponse{},
-		gitLabProjects: map[string]domain.ModuleGitLabProject{},
-		publishLint:    domain.BufLintResult{Status: domain.BufLintStatusPassed},
-		breakingStatus: domain.BreakingReportStatusPassed,
+		now:             time.Date(2026, 6, 4, 12, 0, 0, 0, time.UTC),
+		modules:         map[string]domain.Module{},
+		versions:        map[string]domain.ModuleVersion{},
+		artifacts:       map[string][]domain.Artifact{},
+		objects:         map[string][]byte{},
+		bufConfigs:      map[string]domain.BufConfigInfo{},
+		lintResults:     map[string]domain.BufLintResult{},
+		metadata:        map[string]domain.DescriptorMetadata{},
+		reports:         map[string]registry.CheckBreakingResponse{},
+		gitLabProjects:  map[string]domain.ModuleGitLabProject{},
+		runtimeServices: map[string]domain.RuntimeService{},
+		publishLint:     domain.BufLintResult{Status: domain.BufLintStatusPassed},
+		breakingStatus:  domain.BreakingReportStatusPassed,
 	}
 }
 
@@ -1479,6 +1903,354 @@ func (fake *fakeRegistry) DownloadArtifact(ctx context.Context, moduleName strin
 		SizeBytes:   int64(len(body)),
 		Body:        io.NopCloser(bytes.NewReader(body)),
 	}, artifact, nil
+}
+
+func (fake *fakeRegistry) ReportRuntimeInventory(ctx context.Context, input runtimeinventory.ReportRuntimeInventoryInput) (runtimeinventory.ReportRuntimeInventoryOutput, error) {
+	if fake.runtimeErr != nil {
+		return runtimeinventory.ReportRuntimeInventoryOutput{}, fake.runtimeErr
+	}
+	serviceName, err := domain.NewRuntimeServiceName(input.ServiceName)
+	if err != nil {
+		return runtimeinventory.ReportRuntimeInventoryOutput{}, err
+	}
+	environment, err := domain.NewRuntimeEnvironment(input.Environment)
+	if err != nil {
+		return runtimeinventory.ReportRuntimeInventoryOutput{}, err
+	}
+	if err := domain.ValidateRuntimeGitCommit(input.GitCommit); err != nil {
+		return runtimeinventory.ReportRuntimeInventoryOutput{}, err
+	}
+	if err := domain.ValidateRuntimeBuildVersion(input.BuildVersion); err != nil {
+		return runtimeinventory.ReportRuntimeInventoryOutput{}, err
+	}
+	if len(input.Modules) == 0 {
+		return runtimeinventory.ReportRuntimeInventoryOutput{}, runtimeinventory.ErrRuntimeModulesRequired
+	}
+	service := fake.runtimeServices[serviceName.String()]
+	if service.ID == "" {
+		service = domain.RuntimeService{
+			ID:        domain.NewRuntimeServiceID("runtime-service-" + serviceName.String()),
+			Name:      serviceName,
+			CreatedAt: fake.now,
+			UpdatedAt: fake.now,
+		}
+		fake.runtimeServices[serviceName.String()] = service
+	}
+	deployment := domain.RuntimeDeployment{
+		ID:           domain.NewRuntimeDeploymentID(fmt.Sprintf("runtime-deployment-%d", len(fake.runtimeDeployments)+1)),
+		ServiceID:    service.ID,
+		ServiceName:  service.Name,
+		Environment:  environment,
+		GitCommit:    input.GitCommit,
+		BuildVersion: input.BuildVersion,
+		ReportedAt:   fake.now,
+		CreatedAt:    fake.now,
+	}
+	fake.runtimeDeployments = append(fake.runtimeDeployments, deployment)
+
+	seen := map[string]struct{}{}
+	outputUsages := make([]runtimeinventory.RuntimeModuleUsageOutput, 0, len(input.Modules))
+	for _, reported := range input.Modules {
+		moduleName, err := domain.NewModuleName(reported.Module)
+		if err != nil {
+			return runtimeinventory.ReportRuntimeInventoryOutput{}, err
+		}
+		version, err := domain.NewVersion(reported.Version)
+		if err != nil {
+			return runtimeinventory.ReportRuntimeInventoryOutput{}, err
+		}
+		key := moduleName.String() + "\x00" + version.String()
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		usage, output := fake.runtimeUsageForReport(deployment.ID, moduleName, version)
+		fake.runtimeUsages = append(fake.runtimeUsages, usage)
+		outputUsages = append(outputUsages, output)
+	}
+	if len(outputUsages) == 0 {
+		return runtimeinventory.ReportRuntimeInventoryOutput{}, runtimeinventory.ErrRuntimeModulesRequired
+	}
+	return runtimeinventory.ReportRuntimeInventoryOutput{
+		DeploymentID: deployment.ID.String(),
+		ServiceName:  serviceName.String(),
+		Environment:  environment.String(),
+		GitCommit:    input.GitCommit,
+		BuildVersion: input.BuildVersion,
+		ReportedAt:   fake.now,
+		Usages:       outputUsages,
+	}, nil
+}
+
+func (fake *fakeRegistry) runtimeUsageForReport(deploymentID domain.RuntimeDeploymentID, moduleName domain.ModuleName, version domain.Version) (domain.RuntimeModuleUsage, runtimeinventory.RuntimeModuleUsageOutput) {
+	status := domain.RuntimeDriftStatusUnknownVersion
+	reason := "module_not_found"
+	latestVersion := ""
+	var moduleID *domain.ModuleID
+	var moduleVersionID *domain.ModuleVersionID
+	if module, exists := fake.modules[moduleName.String()]; exists {
+		moduleID = &module.ID
+		if reported, exists := fake.versions[moduleName.String()+":"+version.String()]; exists {
+			moduleVersionID = &reported.ID
+			latest := fake.latestVersion(moduleName.String())
+			if latest.ID != "" {
+				latestVersion = latest.Version.String()
+			}
+			if latest.ID == reported.ID {
+				status = domain.RuntimeDriftStatusUpToDate
+				reason = "up_to_date"
+			} else {
+				status = domain.RuntimeDriftStatusBehindLatest
+				reason = "behind_latest: latest version is " + latestVersion
+			}
+		} else {
+			reason = "version_not_found"
+		}
+	}
+	usage := domain.RuntimeModuleUsage{
+		ID:              domain.NewRuntimeModuleUsageID(fmt.Sprintf("runtime-usage-%d", len(fake.runtimeUsages)+1)),
+		DeploymentID:    deploymentID,
+		ModuleID:        moduleID,
+		ModuleName:      moduleName,
+		ModuleVersionID: moduleVersionID,
+		Version:         version,
+		DriftStatus:     status,
+		DriftReason:     reason,
+		CreatedAt:       fake.now,
+	}
+	if latestVersion != "" {
+		latest, _ := domain.NewVersion(latestVersion)
+		usage.LatestVersion = &latest
+	}
+	return usage, runtimeinventory.RuntimeModuleUsageOutput{
+		Module:        moduleName.String(),
+		Version:       version.String(),
+		LatestVersion: latestVersion,
+		DriftStatus:   status,
+		DriftReason:   reason,
+	}
+}
+
+func (fake *fakeRegistry) latestVersion(moduleName string) domain.ModuleVersion {
+	var latest domain.ModuleVersion
+	for key, version := range fake.versions {
+		if strings.HasPrefix(key, moduleName+":") && (latest.ID == "" || version.CreatedAt.After(latest.CreatedAt)) {
+			latest = version
+		}
+	}
+	return latest
+}
+
+func (fake *fakeRegistry) ListRuntimeServices(ctx context.Context, limit int, offset int) ([]domain.RuntimeServiceSummary, error) {
+	if fake.runtimeErr != nil {
+		return nil, fake.runtimeErr
+	}
+	summaries := make([]domain.RuntimeServiceSummary, 0, len(fake.runtimeServices))
+	for _, service := range fake.runtimeServices {
+		summary := domain.RuntimeServiceSummary{Service: service}
+		environmentSet := map[string]domain.RuntimeEnvironment{}
+		for _, deployment := range fake.runtimeDeployments {
+			if deployment.ServiceID != service.ID {
+				continue
+			}
+			summary.DeploymentCount++
+			environmentSet[deployment.Environment.String()] = deployment.Environment
+			if summary.LatestReportedAt == nil || deployment.ReportedAt.After(*summary.LatestReportedAt) {
+				value := deployment.ReportedAt
+				summary.LatestReportedAt = &value
+			}
+			for _, usage := range fake.runtimeUsages {
+				if usage.DeploymentID == deployment.ID {
+					addRuntimeSummaryDrift(&summary, usage.DriftStatus)
+				}
+			}
+		}
+		for _, environment := range environmentSet {
+			summary.Environments = append(summary.Environments, environment)
+		}
+		summary.EnvironmentCount = len(summary.Environments)
+		summaries = append(summaries, summary)
+	}
+	return summaries, nil
+}
+
+func addRuntimeSummaryDrift(summary *domain.RuntimeServiceSummary, status domain.RuntimeDriftStatus) {
+	switch status {
+	case domain.RuntimeDriftStatusUpToDate:
+		summary.UpToDateCount++
+	case domain.RuntimeDriftStatusBehindLatest:
+		summary.BehindLatestCount++
+	case domain.RuntimeDriftStatusUnknownVersion:
+		summary.UnknownVersionCount++
+	case domain.RuntimeDriftStatusDeprecatedVersion:
+		summary.DeprecatedCount++
+	}
+}
+
+func (fake *fakeRegistry) GetRuntimeServiceDetails(ctx context.Context, serviceNameValue string) (domain.RuntimeServiceDetails, error) {
+	if fake.runtimeErr != nil {
+		return domain.RuntimeServiceDetails{}, fake.runtimeErr
+	}
+	service, exists := fake.runtimeServices[serviceNameValue]
+	if !exists {
+		return domain.RuntimeServiceDetails{}, domain.ErrNotFound
+	}
+	deployments := make([]domain.RuntimeDeployment, 0)
+	usages := make([]domain.RuntimeModuleUsage, 0)
+	for _, deployment := range fake.runtimeDeployments {
+		if deployment.ServiceID != service.ID {
+			continue
+		}
+		deployments = append(deployments, deployment)
+		for _, usage := range fake.runtimeUsages {
+			if usage.DeploymentID == deployment.ID {
+				usages = append(usages, usage)
+			}
+		}
+	}
+	return domain.RuntimeServiceDetails{Service: service, Deployments: deployments, Usages: usages}, nil
+}
+
+func (fake *fakeRegistry) GetEnvironmentInventory(ctx context.Context, environmentValue string, limit int, offset int) (domain.RuntimeEnvironmentInventory, error) {
+	if fake.runtimeErr != nil {
+		return domain.RuntimeEnvironmentInventory{}, fake.runtimeErr
+	}
+	environment, err := domain.NewRuntimeEnvironment(environmentValue)
+	if err != nil {
+		return domain.RuntimeEnvironmentInventory{}, err
+	}
+	deployments := make([]domain.RuntimeDeployment, 0)
+	usages := make([]domain.RuntimeModuleUsage, 0)
+	for _, deployment := range fake.runtimeDeployments {
+		if deployment.Environment != environment {
+			continue
+		}
+		deployments = append(deployments, deployment)
+		for _, usage := range fake.runtimeUsages {
+			if usage.DeploymentID == deployment.ID {
+				usages = append(usages, usage)
+			}
+		}
+	}
+	return domain.RuntimeEnvironmentInventory{Environment: environment, Deployments: deployments, Usages: usages}, nil
+}
+
+func (fake *fakeRegistry) GetModuleRuntimeUsages(ctx context.Context, moduleNameValue string, limit int, offset int) ([]domain.ModuleRuntimeUsage, error) {
+	if fake.runtimeErr != nil {
+		return nil, fake.runtimeErr
+	}
+	moduleName, err := domain.NewModuleName(moduleNameValue)
+	if err != nil {
+		return nil, err
+	}
+	items := make([]domain.ModuleRuntimeUsage, 0)
+	for _, usage := range fake.runtimeUsages {
+		if usage.ModuleName != moduleName {
+			continue
+		}
+		for _, deployment := range fake.runtimeDeployments {
+			if deployment.ID == usage.DeploymentID {
+				items = append(items, domain.ModuleRuntimeUsage{
+					ServiceName:  deployment.ServiceName,
+					Environment:  deployment.Environment,
+					DeploymentID: deployment.ID,
+					ModuleName:   usage.ModuleName,
+					Version:      usage.Version,
+					GitCommit:    deployment.GitCommit,
+					BuildVersion: deployment.BuildVersion,
+					ReportedAt:   deployment.ReportedAt,
+					DriftStatus:  usage.DriftStatus,
+					DriftReason:  usage.DriftReason,
+				})
+			}
+		}
+	}
+	return items, nil
+}
+
+func (fake *fakeRegistry) GetBreakingReportRuntimeImpact(ctx context.Context, reportID domain.BreakingReportID, limit int, offset int) ([]domain.RuntimeImpact, error) {
+	if fake.runtimeErr != nil {
+		return nil, fake.runtimeErr
+	}
+	report, exists := fake.reports[reportID.String()]
+	if !exists {
+		return nil, registry.ErrBreakingReportNotFound
+	}
+	items := make([]domain.RuntimeImpact, 0)
+	for _, usage := range fake.runtimeUsages {
+		if usage.ModuleVersionID == nil || *usage.ModuleVersionID != report.Report.BaseVersionID {
+			continue
+		}
+		for _, deployment := range fake.runtimeDeployments {
+			if deployment.ID == usage.DeploymentID {
+				items = append(items, domain.RuntimeImpact{
+					ServiceName:  deployment.ServiceName,
+					Environment:  deployment.Environment,
+					UsedModule:   usage.ModuleName,
+					UsedVersion:  usage.Version,
+					GitCommit:    deployment.GitCommit,
+					BuildVersion: deployment.BuildVersion,
+					ReportedAt:   deployment.ReportedAt,
+					ImpactStatus: domain.RuntimeImpactStatusPotentiallyAffectedByBreakingChange,
+					Reason:       "exact runtime module version matches breaking report base version",
+				})
+			}
+		}
+	}
+	return items, nil
+}
+
+func (fake *fakeRegistry) seedRuntimeServiceSummary(t *testing.T, serviceNameValue string, environmentValue string) {
+	t.Helper()
+	serviceName, _ := domain.NewRuntimeServiceName(serviceNameValue)
+	environment, _ := domain.NewRuntimeEnvironment(environmentValue)
+	fake.runtimeServices[serviceName.String()] = domain.RuntimeService{
+		ID:        domain.NewRuntimeServiceID("runtime-service-" + serviceName.String()),
+		Name:      serviceName,
+		CreatedAt: fake.now,
+		UpdatedAt: fake.now,
+	}
+	fake.runtimeDeployments = append(fake.runtimeDeployments, domain.RuntimeDeployment{
+		ID:           domain.NewRuntimeDeploymentID("runtime-deployment-summary"),
+		ServiceID:    fake.runtimeServices[serviceName.String()].ID,
+		ServiceName:  serviceName,
+		Environment:  environment,
+		GitCommit:    "abc123",
+		BuildVersion: "build-1",
+		ReportedAt:   fake.now,
+		CreatedAt:    fake.now,
+	})
+}
+
+func (fake *fakeRegistry) seedRuntimeDeployment(t *testing.T, serviceNameValue string, environmentValue string, moduleNameValue string, versionValue string) {
+	t.Helper()
+	serviceName, _ := domain.NewRuntimeServiceName(serviceNameValue)
+	environment, _ := domain.NewRuntimeEnvironment(environmentValue)
+	moduleName, _ := domain.NewModuleName(moduleNameValue)
+	version, _ := domain.NewVersion(versionValue)
+	service := fake.runtimeServices[serviceName.String()]
+	if service.ID == "" {
+		service = domain.RuntimeService{
+			ID:        domain.NewRuntimeServiceID("runtime-service-" + serviceName.String()),
+			Name:      serviceName,
+			CreatedAt: fake.now,
+			UpdatedAt: fake.now,
+		}
+		fake.runtimeServices[serviceName.String()] = service
+	}
+	deployment := domain.RuntimeDeployment{
+		ID:           domain.NewRuntimeDeploymentID(fmt.Sprintf("runtime-deployment-%d", len(fake.runtimeDeployments)+1)),
+		ServiceID:    service.ID,
+		ServiceName:  serviceName,
+		Environment:  environment,
+		GitCommit:    "abc123",
+		BuildVersion: "build-1",
+		ReportedAt:   fake.now,
+		CreatedAt:    fake.now,
+	}
+	fake.runtimeDeployments = append(fake.runtimeDeployments, deployment)
+	usage, _ := fake.runtimeUsageForReport(deployment.ID, moduleName, version)
+	fake.runtimeUsages = append(fake.runtimeUsages, usage)
 }
 
 func testDescriptorMetadata() domain.DescriptorMetadata {

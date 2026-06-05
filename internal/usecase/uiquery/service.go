@@ -25,6 +25,7 @@ type Service struct {
 	metadata       domain.DescriptorMetadataRepository
 	reports        domain.BreakingReportRepository
 	dependencies   domain.ModuleDependencyRepository
+	runtime        domain.RuntimeInventoryRepository
 }
 
 func NewService(
@@ -36,6 +37,7 @@ func NewService(
 	metadata domain.DescriptorMetadataRepository,
 	reports domain.BreakingReportRepository,
 	dependencies domain.ModuleDependencyRepository,
+	runtime domain.RuntimeInventoryRepository,
 ) *Service {
 	return &Service{
 		modules:        modules,
@@ -46,6 +48,7 @@ func NewService(
 		metadata:       metadata,
 		reports:        reports,
 		dependencies:   dependencies,
+		runtime:        runtime,
 	}
 }
 
@@ -172,11 +175,16 @@ func (svc *Service) GetBreakingReportDetails(ctx context.Context, input GetBreak
 	if err != nil {
 		return BreakingReportDetails{}, err
 	}
+	runtimeImpact, err := svc.runtimeImpact(ctx, report.ID, report.BaseVersionID)
+	if err != nil {
+		return BreakingReportDetails{}, err
+	}
 	return BreakingReportDetails{
 		Report:          breakingReportSummary(report),
 		Summary:         report.HumanSummary,
 		Changes:         items,
 		AffectedModules: affected,
+		RuntimeImpact:   runtimeImpact,
 	}, nil
 }
 
@@ -206,6 +214,114 @@ func (svc *Service) GetModuleDependencyGraph(ctx context.Context, input GetModul
 		Upstream:   dependencyModules(upstream, true),
 		Unresolved: unresolvedDependencies(unresolved),
 	}, nil
+}
+
+func (svc *Service) ListRuntimeServices(ctx context.Context, input ListRuntimeServicesInput) ([]RuntimeServiceSummary, error) {
+	if svc.runtime == nil {
+		return []RuntimeServiceSummary{}, nil
+	}
+	summaries, err := svc.runtime.ListRuntimeServices(ctx, defaultListLimit, 0)
+	if err != nil {
+		return nil, err
+	}
+	query := normalize(input.Query)
+	environment := normalize(input.Environment)
+	driftStatus := normalize(input.DriftStatus)
+	items := make([]RuntimeServiceSummary, 0, len(summaries))
+	for _, summary := range summaries {
+		item := runtimeServiceSummary(summary)
+		if query != "" && !strings.Contains(normalize(item.ServiceName), query) {
+			continue
+		}
+		if environment != "" && !runtimeSummaryHasEnvironment(item, environment) {
+			continue
+		}
+		if driftStatus != "" && runtimeDriftCount(item, driftStatus) == 0 {
+			continue
+		}
+		items = append(items, item)
+	}
+	sort.SliceStable(items, func(i, j int) bool {
+		if items[i].LastReportedAt == nil {
+			return false
+		}
+		if items[j].LastReportedAt == nil {
+			return true
+		}
+		return items[i].LastReportedAt.After(*items[j].LastReportedAt)
+	})
+	return items, nil
+}
+
+func (svc *Service) GetRuntimeServiceDetails(ctx context.Context, input GetRuntimeServiceDetailsInput) (RuntimeServiceDetails, error) {
+	if svc.runtime == nil {
+		return RuntimeServiceDetails{}, domain.ErrNotFound
+	}
+	serviceName, err := domain.NewRuntimeServiceName(input.Service)
+	if err != nil {
+		return RuntimeServiceDetails{}, domain.ErrNotFound
+	}
+	details, err := svc.runtime.GetRuntimeServiceDetails(ctx, serviceName)
+	if err != nil {
+		return RuntimeServiceDetails{}, err
+	}
+	return runtimeServiceDetails(details), nil
+}
+
+func (svc *Service) GetRuntimeEnvironmentInventory(ctx context.Context, input GetRuntimeEnvironmentInventoryInput) (RuntimeEnvironmentInventory, error) {
+	if svc.runtime == nil {
+		return RuntimeEnvironmentInventory{Environment: strings.TrimSpace(input.Environment), Deployments: []RuntimeDeployment{}, Usages: []RuntimeModuleUsage{}}, nil
+	}
+	environment, err := domain.NewRuntimeEnvironment(input.Environment)
+	if err != nil {
+		return RuntimeEnvironmentInventory{}, domain.ErrInvalidRuntimeEnvironment
+	}
+	inventory, err := svc.runtime.ListRuntimeEnvironmentInventory(ctx, environment, defaultListLimit, 0)
+	if err != nil && !errors.Is(err, domain.ErrNotFound) {
+		return RuntimeEnvironmentInventory{}, err
+	}
+	if err != nil {
+		return RuntimeEnvironmentInventory{Environment: environment.String(), Deployments: []RuntimeDeployment{}, Usages: []RuntimeModuleUsage{}}, nil
+	}
+	return runtimeEnvironmentInventory(inventory), nil
+}
+
+func (svc *Service) GetModuleRuntimeUsages(ctx context.Context, input GetModuleRuntimeUsagesInput) (ModuleRuntimeUsages, error) {
+	if svc.runtime == nil {
+		return ModuleRuntimeUsages{}, domain.ErrNotFound
+	}
+	module, err := svc.moduleByName(ctx, input.Module)
+	if err != nil {
+		return ModuleRuntimeUsages{}, err
+	}
+	usages, err := svc.runtime.ListModuleRuntimeUsages(ctx, module.ID, defaultListLimit, 0)
+	if err != nil && !errors.Is(err, domain.ErrNotFound) {
+		return ModuleRuntimeUsages{}, err
+	}
+	if err != nil {
+		usages = []domain.ModuleRuntimeUsage{}
+	}
+	latestVersion := ""
+	latest, err := svc.versions.GetLatestByModule(ctx, module.ID)
+	if err != nil && !errors.Is(err, domain.ErrNotFound) {
+		return ModuleRuntimeUsages{}, err
+	}
+	if err == nil {
+		latestVersion = latest.Version.String()
+	}
+	return ModuleRuntimeUsages{Module: module.Name.String(), Usages: moduleRuntimeUsages(usages, latestVersion)}, nil
+}
+
+func (svc *Service) GetBreakingReportRuntimeImpact(ctx context.Context, input GetBreakingReportRuntimeImpactInput) ([]RuntimeImpact, error) {
+	reportID := domain.NewBreakingReportID(input.ReportID)
+	if reportID == "" {
+		return nil, domain.ErrNotFound
+	}
+	report, _, err := svc.reports.GetByID(ctx, reportID)
+	if err != nil {
+		return nil, err
+	}
+	return svc.runtimeImpact(ctx, report.ID, report.BaseVersionID)
 }
 
 func (svc *Service) moduleByName(ctx context.Context, moduleName string) (domain.Module, error) {
@@ -463,6 +579,149 @@ func unresolvedDependencies(unresolved []domain.UnresolvedProtoDependency) []Unr
 		})
 	}
 	return items
+}
+
+func runtimeServiceSummary(summary domain.RuntimeServiceSummary) RuntimeServiceSummary {
+	environments := make([]string, 0, len(summary.Environments))
+	for _, environment := range summary.Environments {
+		environments = append(environments, environment.String())
+	}
+	sort.Strings(environments)
+	return RuntimeServiceSummary{
+		ServiceName:         summary.Service.Name.String(),
+		Environments:        environments,
+		LastReportedAt:      summary.LatestReportedAt,
+		UpToDateCount:       summary.UpToDateCount,
+		BehindLatestCount:   summary.BehindLatestCount,
+		UnknownVersionCount: summary.UnknownVersionCount,
+		DeprecatedCount:     summary.DeprecatedCount,
+	}
+}
+
+func runtimeServiceDetails(details domain.RuntimeServiceDetails) RuntimeServiceDetails {
+	return RuntimeServiceDetails{
+		ServiceName: details.Service.Name.String(),
+		Deployments: runtimeDeployments(details.Deployments),
+		Usages:      runtimeModuleUsages(details.Usages),
+	}
+}
+
+func runtimeEnvironmentInventory(inventory domain.RuntimeEnvironmentInventory) RuntimeEnvironmentInventory {
+	return RuntimeEnvironmentInventory{
+		Environment: inventory.Environment.String(),
+		Deployments: runtimeDeployments(inventory.Deployments),
+		Usages:      runtimeModuleUsages(inventory.Usages),
+	}
+}
+
+func runtimeDeployments(deployments []domain.RuntimeDeployment) []RuntimeDeployment {
+	items := make([]RuntimeDeployment, 0, len(deployments))
+	for _, deployment := range deployments {
+		items = append(items, RuntimeDeployment{
+			ID:           deployment.ID.String(),
+			ServiceName:  deployment.ServiceName.String(),
+			Environment:  deployment.Environment.String(),
+			GitCommit:    deployment.GitCommit,
+			BuildVersion: deployment.BuildVersion,
+			ReportedAt:   deployment.ReportedAt,
+			CreatedAt:    deployment.CreatedAt,
+		})
+	}
+	return items
+}
+
+func runtimeModuleUsages(usages []domain.RuntimeModuleUsage) []RuntimeModuleUsage {
+	items := make([]RuntimeModuleUsage, 0, len(usages))
+	for _, usage := range usages {
+		latestVersion := ""
+		if usage.LatestVersion != nil {
+			latestVersion = usage.LatestVersion.String()
+		}
+		items = append(items, RuntimeModuleUsage{
+			DeploymentID:  usage.DeploymentID.String(),
+			Module:        usage.ModuleName.String(),
+			Version:       usage.Version.String(),
+			LatestVersion: latestVersion,
+			DriftStatus:   usage.DriftStatus.String(),
+			DriftReason:   usage.DriftReason,
+		})
+	}
+	return items
+}
+
+func moduleRuntimeUsages(usages []domain.ModuleRuntimeUsage, latestVersion string) []ModuleRuntimeUsage {
+	items := make([]ModuleRuntimeUsage, 0, len(usages))
+	for _, usage := range usages {
+		items = append(items, ModuleRuntimeUsage{
+			ServiceName:   usage.ServiceName.String(),
+			Environment:   usage.Environment.String(),
+			Module:        usage.ModuleName.String(),
+			Version:       usage.Version.String(),
+			LatestVersion: latestVersion,
+			GitCommit:     usage.GitCommit,
+			BuildVersion:  usage.BuildVersion,
+			ReportedAt:    usage.ReportedAt,
+			DriftStatus:   usage.DriftStatus.String(),
+			DriftReason:   usage.DriftReason,
+		})
+	}
+	return items
+}
+
+func runtimeImpacts(impacts []domain.RuntimeImpact) []RuntimeImpact {
+	items := make([]RuntimeImpact, 0, len(impacts))
+	for _, impact := range impacts {
+		items = append(items, RuntimeImpact{
+			ServiceName:  impact.ServiceName.String(),
+			Environment:  impact.Environment.String(),
+			UsedModule:   impact.UsedModule.String(),
+			UsedVersion:  impact.UsedVersion.String(),
+			GitCommit:    impact.GitCommit,
+			BuildVersion: impact.BuildVersion,
+			ReportedAt:   impact.ReportedAt,
+			ImpactStatus: impact.ImpactStatus.String(),
+			Reason:       impact.Reason,
+		})
+	}
+	return items
+}
+
+func (svc *Service) runtimeImpact(ctx context.Context, reportID domain.BreakingReportID, baseVersionID domain.ModuleVersionID) ([]RuntimeImpact, error) {
+	if svc.runtime == nil {
+		return []RuntimeImpact{}, nil
+	}
+	impacts, err := svc.runtime.ListRuntimeImpactByModuleVersion(ctx, reportID, baseVersionID, defaultListLimit, 0)
+	if err != nil && !errors.Is(err, domain.ErrNotFound) {
+		return nil, err
+	}
+	if err != nil {
+		return []RuntimeImpact{}, nil
+	}
+	return runtimeImpacts(impacts), nil
+}
+
+func runtimeSummaryHasEnvironment(summary RuntimeServiceSummary, environment string) bool {
+	for _, item := range summary.Environments {
+		if normalize(item) == environment {
+			return true
+		}
+	}
+	return false
+}
+
+func runtimeDriftCount(summary RuntimeServiceSummary, driftStatus string) int {
+	switch driftStatus {
+	case domain.RuntimeDriftStatusUpToDate.String():
+		return summary.UpToDateCount
+	case domain.RuntimeDriftStatusBehindLatest.String():
+		return summary.BehindLatestCount
+	case domain.RuntimeDriftStatusUnknownVersion.String():
+		return summary.UnknownVersionCount
+	case domain.RuntimeDriftStatusDeprecatedVersion.String():
+		return summary.DeprecatedCount
+	default:
+		return 0
+	}
 }
 
 func stringSetValues(values map[string]struct{}) []string {

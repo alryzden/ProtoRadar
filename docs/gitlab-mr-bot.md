@@ -15,10 +15,11 @@ Flow:
 3. The CLI reads ProtoRadar credentials from `PROTORADAR_SERVER_URL` and `PROTORADAR_TOKEN`.
 4. The CLI packages the Buf workspace and calls the ProtoRadar breaking-check REST API.
 5. The CLI fetches direct downstream affected modules from ProtoRadar when the dependency graph API is available.
-6. The CLI calls the GitLab API with `PROTORADAR_GITLAB_TOKEN`.
-7. The CLI creates or updates a GitLab merge request comment.
-8. The CLI sets a GitLab commit status when status updates are enabled.
-9. The CLI exits with stable code `0`, `1`, or `2`.
+6. The CLI fetches runtime impact for the breaking report when a report ID is available.
+7. The CLI calls the GitLab API with `PROTORADAR_GITLAB_TOKEN`.
+8. The CLI creates or updates a GitLab merge request comment.
+9. The CLI sets a GitLab commit status when status updates are enabled.
+10. The CLI exits with stable code `0`, `1`, or `2`.
 
 Breaking changes are normal governance results. They return exit code `1`, not a tool failure.
 
@@ -67,7 +68,7 @@ Exact permissions can differ between GitLab.com and self-managed GitLab installa
 ```yaml
 include:
   - project: platform/protoradar
-    ref: v0.5.0
+    ref: v1.0.0
     file:
       - /examples/gitlab/protoradar-mr-check.yml
 
@@ -110,7 +111,7 @@ ProtoRadar includes a hidden marker at the top of each MR bot comment:
 
 When the job runs, ProtoRadar lists existing merge request notes and looks for this marker. If it finds one marker comment, it updates that comment. If it finds multiple marker comments, it updates the latest one when timestamps are available, otherwise the last matching note in the list.
 
-Duplicate comments are avoided by updating the marker comment. Phase 5 does not delete older duplicates. If someone manually removes the marker from the comment, the next run may create a new comment.
+Duplicate comments are avoided by updating the marker comment. Community v1.0 does not delete older duplicates. If someone manually removes the marker from the comment, the next run may create a new comment.
 
 ## Potentially Affected Modules
 
@@ -130,6 +131,32 @@ No downstream modules are currently known to depend on this module.
 ```
 
 The affected-module lookup is best-effort so a dependency graph API problem does not hide the primary breaking-check result. The Markdown renderer only displays affected-module data; dependency graph computation stays in ProtoRadar application/query services.
+
+## Runtime Impact
+
+MR comments include a Runtime impact section after Potentially Affected Modules. After the breaking check completes, the runner asks ProtoRadar for services and environments currently using the exact base module version from the breaking report.
+
+When runtime usage is known, the comment renders a capped table with:
+
+- service;
+- environment;
+- used module version;
+- build version;
+- git commit.
+
+If no runtime services are known, the comment says:
+
+```text
+No runtime services are currently known to use the affected module version.
+```
+
+Runtime impact lookup is best-effort. If the runtime impact API fails but the breaking check succeeds, the MR check keeps the breaking-check exit code and renders:
+
+```text
+Runtime impact could not be loaded. Check CI logs.
+```
+
+Runtime impact uses exact base-version matching in the Community v1.0 MVP. It does not perform SemVer range matching or transitive runtime impact analysis.
 
 ## Commit Status Behavior
 
@@ -165,7 +192,7 @@ The status target URL defaults to `CI_JOB_URL` in the CI template.
 - Avoid exposing bot tokens to untrusted pipelines.
 - Do not echo tokens in scripts.
 
-ProtoRadar does not store GitLab bot tokens server-side in Phase 5.
+ProtoRadar does not store GitLab bot tokens server-side in Community v1.0.
 
 ## Troubleshooting
 
@@ -182,7 +209,7 @@ Verify `CI_PROJECT_ID`, `CI_MERGE_REQUEST_IID`, and `CI_SERVER_URL`. Ensure the 
 Check job logs for GitLab API errors, verify `PROTORADAR_GITLAB_TOKEN`, and confirm the template is `protoradar-mr-check.yml` rather than the simple `protoradar-breaking-check.yml`.
 
 `Duplicate comments`:
-ProtoRadar updates comments by hidden marker. If the marker was removed manually, the next run may create a new comment. Phase 5 does not delete duplicate comments.
+ProtoRadar updates comments by hidden marker. If the marker was removed manually, the next run may create a new comment. Community v1.0 does not delete duplicate comments.
 
 `Commit status not visible`:
 Verify status updates are not disabled with `--status=false`, check token permissions, and confirm the status is attached to `CI_COMMIT_SHA`.
@@ -198,3 +225,6 @@ The version named by `PROTORADAR_AGAINST` does not exist. Publish a baseline fir
 
 `baseline has no Buf image`:
 The baseline version does not have a stored `buf_image` artifact. Publish a new baseline with the current `protoradar push` workflow.
+
+`runtime impact could not be loaded`:
+The breaking check completed, but the runtime impact lookup failed. Check ProtoRadar API reachability, token permissions, and server logs. The breaking-check exit code is still based on the compatibility result.

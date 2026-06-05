@@ -1,0 +1,11 @@
+version: v2
+modules:
+  - path: user-api/proto
+  - path: billing-api/proto
+  - path: notification-api/proto
+lint:
+  use:
+    - STANDARD
+breaking:
+  use:
+    - FILE

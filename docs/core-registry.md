@@ -55,7 +55,10 @@ Public:
 ```text
 GET /healthz
 GET /readyz
+GET /metrics
 ```
+
+`/healthz` is a lightweight liveness endpoint. `/readyz` checks required dependencies and returns dependency statuses without exposing DSNs or credentials. `/metrics` exposes Prometheus text-format metrics.
 
 Read-only Web UI:
 
@@ -101,7 +104,7 @@ Publish a version from a Buf module root:
 ```sh
 protoradar push user-api \
   --version v1.1.0 \
-  --path examples/user-api
+  --path examples/repos/user-api
 ```
 
 In GitLab CI, use `examples/gitlab/protoradar-publish.yml` to publish from tag pipelines. The publish version defaults to `CI_COMMIT_TAG`; set `PROTORADAR_PUBLISH_VERSION` to override it.
@@ -136,7 +139,7 @@ Check for breaking changes:
 
 ```sh
 protoradar check-breaking user-api \
-  --path examples/user-api \
+  --path examples/repos/user-api \
   --against latest
 ```
 

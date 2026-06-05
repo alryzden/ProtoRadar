@@ -14,7 +14,7 @@ func TestNewHTTPHandlerRegistersUIWhenEnabled(t *testing.T) {
 	cfg := runtimeConfigForHTTPTest()
 	cfg.UI.Enabled = true
 
-	handler, err := NewHTTPHandler(nil, fakeUIQuery{}, cfg, func(ctx context.Context) error { return nil })
+	handler, err := NewHTTPHandler(nil, nil, fakeUIQuery{}, cfg, func(ctx context.Context) error { return nil })
 	if err != nil {
 		t.Fatalf("new handler: %v", err)
 	}
@@ -29,7 +29,7 @@ func TestNewHTTPHandlerDoesNotRegisterUIWhenDisabled(t *testing.T) {
 	cfg := runtimeConfigForHTTPTest()
 	cfg.UI.Enabled = false
 
-	handler, err := NewHTTPHandler(nil, nil, cfg, func(ctx context.Context) error { return nil })
+	handler, err := NewHTTPHandler(nil, nil, nil, cfg, func(ctx context.Context) error { return nil })
 	if err != nil {
 		t.Fatalf("new handler: %v", err)
 	}
@@ -77,6 +77,22 @@ func (fakeUIQuery) ListBreakingReportOverviews(ctx context.Context, input uiquer
 
 func (fakeUIQuery) GetBreakingReportDetails(ctx context.Context, input uiquery.GetBreakingReportDetailsInput) (uiquery.BreakingReportDetails, error) {
 	return uiquery.BreakingReportDetails{}, nil
+}
+
+func (fakeUIQuery) ListRuntimeServices(ctx context.Context, input uiquery.ListRuntimeServicesInput) ([]uiquery.RuntimeServiceSummary, error) {
+	return []uiquery.RuntimeServiceSummary{}, nil
+}
+
+func (fakeUIQuery) GetRuntimeServiceDetails(ctx context.Context, input uiquery.GetRuntimeServiceDetailsInput) (uiquery.RuntimeServiceDetails, error) {
+	return uiquery.RuntimeServiceDetails{}, nil
+}
+
+func (fakeUIQuery) GetRuntimeEnvironmentInventory(ctx context.Context, input uiquery.GetRuntimeEnvironmentInventoryInput) (uiquery.RuntimeEnvironmentInventory, error) {
+	return uiquery.RuntimeEnvironmentInventory{}, nil
+}
+
+func (fakeUIQuery) GetModuleRuntimeUsages(ctx context.Context, input uiquery.GetModuleRuntimeUsagesInput) (uiquery.ModuleRuntimeUsages, error) {
+	return uiquery.ModuleRuntimeUsages{}, nil
 }
 
 func request(t *testing.T, handler http.Handler, path string) *httptest.ResponseRecorder {

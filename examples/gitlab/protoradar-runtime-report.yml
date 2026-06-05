@@ -1,0 +1,63 @@
+# Reusable ProtoRadar runtime inventory report job for GitLab deploy pipelines.
+# Override PROTORADAR_CLI_IMAGE until an official ProtoRadar CLI image is published.
+# Store PROTORADAR_TOKEN as a masked GitLab CI/CD variable. Do not echo or commit tokens.
+
+variables:
+  PROTORADAR_CLI_IMAGE: "ghcr.io/alryzden/protoradar-cli:latest"
+  PROTORADAR_RUNTIME_FILE: "protoradar-runtime.yaml"
+
+.protoradar-runtime-report:
+  image: "$PROTORADAR_CLI_IMAGE"
+  stage: deploy
+  script:
+    - |
+      set -eu
+      if [ -z "${PROTORADAR_SERVER_URL:-}" ]; then
+        echo "PROTORADAR_SERVER_URL is required" >&2
+        exit 2
+      fi
+      if [ -z "${PROTORADAR_TOKEN:-}" ]; then
+        echo "PROTORADAR_TOKEN is required. Configure it as a masked GitLab CI/CD variable." >&2
+        exit 2
+      fi
+
+      service_name="${PROTORADAR_SERVICE:-${CI_PROJECT_NAME:-}}"
+      environment_name="${PROTORADAR_ENVIRONMENT:-${CI_ENVIRONMENT_NAME:-}}"
+      build_version="${PROTORADAR_BUILD_VERSION:-${CI_COMMIT_TAG:-${CI_COMMIT_SHORT_SHA:-}}}"
+      git_commit="${CI_COMMIT_SHA:-}"
+
+      set --
+      if [ -n "${service_name}" ]; then
+        set -- "$@" --service "${service_name}"
+      fi
+      if [ -n "${environment_name}" ]; then
+        set -- "$@" --environment "${environment_name}"
+      fi
+      if [ -n "${git_commit}" ]; then
+        set -- "$@" --git-commit "${git_commit}"
+      fi
+      if [ -n "${build_version}" ]; then
+        set -- "$@" --build-version "${build_version}"
+      fi
+
+      if [ -f "${PROTORADAR_RUNTIME_FILE:-protoradar-runtime.yaml}" ]; then
+        protoradar runtime report \
+          --from-file "${PROTORADAR_RUNTIME_FILE:-protoradar-runtime.yaml}" \
+          "$@"
+      else
+        if [ -z "${PROTORADAR_RUNTIME_MODULES:-}" ]; then
+          echo "Set PROTORADAR_RUNTIME_FILE or PROTORADAR_RUNTIME_MODULES, for example: user-api@v1.2.0 billing-api@v1.4.0" >&2
+          exit 2
+        fi
+        module_args_count=0
+        for module_ref in ${PROTORADAR_RUNTIME_MODULES}; do
+          set -- "$@" --module "${module_ref}"
+          module_args_count=$((module_args_count + 1))
+        done
+        if [ "${module_args_count}" -eq 0 ]; then
+          echo "PROTORADAR_RUNTIME_MODULES must include at least one module@version value" >&2
+          exit 2
+        fi
+        protoradar runtime report \
+          "$@"
+      fi

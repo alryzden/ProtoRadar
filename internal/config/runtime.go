@@ -11,10 +11,12 @@ type RuntimeConfig struct {
 	Buf      RuntimeBufConfig
 	Breaking RuntimeBreakingConfig
 	UI       RuntimeUIConfig
+	Log      RuntimeLogConfig
 }
 
 type RuntimeServerConfig struct {
-	HTTPAddr string
+	HTTPAddr            string
+	MaxRequestBodyBytes int64
 }
 
 type RuntimeDatabaseConfig struct {
@@ -62,4 +64,9 @@ type RuntimeUIConfig struct {
 	Enabled    bool
 	BasePath   string
 	StaticPath string
+}
+
+type RuntimeLogConfig struct {
+	Level  string
+	Format string
 }

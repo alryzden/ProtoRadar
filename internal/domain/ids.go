@@ -91,3 +91,33 @@ func NewUnresolvedProtoDependencyID(value string) UnresolvedProtoDependencyID {
 func (id UnresolvedProtoDependencyID) String() string {
 	return string(id)
 }
+
+type RuntimeServiceID string
+
+func NewRuntimeServiceID(value string) RuntimeServiceID {
+	return RuntimeServiceID(strings.TrimSpace(value))
+}
+
+func (id RuntimeServiceID) String() string {
+	return string(id)
+}
+
+type RuntimeDeploymentID string
+
+func NewRuntimeDeploymentID(value string) RuntimeDeploymentID {
+	return RuntimeDeploymentID(strings.TrimSpace(value))
+}
+
+func (id RuntimeDeploymentID) String() string {
+	return string(id)
+}
+
+type RuntimeModuleUsageID string
+
+func NewRuntimeModuleUsageID(value string) RuntimeModuleUsageID {
+	return RuntimeModuleUsageID(strings.TrimSpace(value))
+}
+
+func (id RuntimeModuleUsageID) String() string {
+	return string(id)
+}

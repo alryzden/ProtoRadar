@@ -1,0 +1,52 @@
+{{template "header" .}}
+{{with .ModuleRuntimeView}}
+<nav class="breadcrumb" aria-label="Breadcrumb">
+  <a href="{{.ModuleURL}}">{{.Module}}</a>
+  <span>/</span>
+  <span>Runtime Usages</span>
+</nav>
+<section class="hero compact">
+  <div>
+    <p class="eyebrow">Module Runtime Usage</p>
+    <h1>{{.Module}}</h1>
+    <p>Inspect services and environments reporting this module at runtime.</p>
+  </div>
+  <span class="badge badge-unknown">runtime</span>
+</section>
+<section class="card">
+  <div class="section-heading"><div><p class="eyebrow">Consumers</p><h2>Runtime Services Using This Module</h2></div></div>
+  {{if .HasUsages}}
+  <div class="table-wrap embedded">
+    <table>
+      <thead>
+        <tr>
+          <th>Service</th>
+          <th>Environment</th>
+          <th>Used Version</th>
+          <th>Latest Version</th>
+          <th>Drift Status</th>
+          <th>Drift Reason</th>
+          <th>Reported</th>
+        </tr>
+      </thead>
+      <tbody>
+        {{range .Usages}}
+        <tr>
+          <td><a href="{{.ServiceURL}}">{{.ServiceName}}</a></td>
+          <td><a href="{{.EnvironmentURL}}">{{.Environment}}</a></td>
+          <td><span class="code-inline">{{.Version}}</span></td>
+          <td>{{if .LatestVersion}}<span class="code-inline">{{.LatestVersion}}</span>{{else}}<span class="muted">Unknown</span>{{end}}</td>
+          <td><span class="{{badgeClass .DriftStatus}}">{{badgeText .DriftStatus}}</span></td>
+          <td>{{if .DriftReason}}{{.DriftReason}}{{else}}<span class="muted">None</span>{{end}}</td>
+          <td>{{if .ReportedAt}}{{.ReportedAt}}{{else}}<span class="muted">Unknown</span>{{end}}</td>
+        </tr>
+        {{end}}
+      </tbody>
+    </table>
+  </div>
+  {{else}}
+  {{template "empty_state" $}}
+  {{end}}
+</section>
+{{end}}
+{{template "footer" .}}

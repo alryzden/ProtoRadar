@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"os"
 	"strings"
 
 	"github.com/alryzden/ProtoRadar/internal/config"
@@ -11,10 +12,19 @@ import (
 	"github.com/alryzden/ProtoRadar/internal/transport/web"
 )
 
-func NewHTTPHandler(registry httptransport.Registry, uiQuery web.Query, cfg config.RuntimeConfig, ready func(context.Context) error) (http.Handler, error) {
+func NewHTTPHandler(registry httptransport.Registry, runtimeInventory httptransport.RuntimeInventory, uiQuery web.Query, cfg config.RuntimeConfig, ready func(context.Context) error) (http.Handler, error) {
+	logger, err := httptransport.NewLogger(cfg.Log.Level, cfg.Log.Format, os.Stdout)
+	if err != nil {
+		return nil, fmt.Errorf("create logger: %w", err)
+	}
+
 	apiHandler := httptransport.NewServer(registry, httptransport.Options{
-		BootstrapToken: cfg.Auth.BootstrapToken,
-		Ready:          ready,
+		BootstrapToken:      cfg.Auth.BootstrapToken,
+		Runtime:             runtimeInventory,
+		Ready:               ready,
+		Logger:              logger,
+		Metrics:             httptransport.NewMetrics(),
+		MaxRequestBodyBytes: cfg.Server.MaxRequestBodyBytes,
 	}).Handler()
 
 	if !cfg.UI.Enabled {

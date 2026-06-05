@@ -28,6 +28,36 @@ func TestLoginRequiresServerAndToken(t *testing.T) {
 	}
 }
 
+func TestHelpContainsKeyCommands(t *testing.T) {
+	var output bytes.Buffer
+	app := App{Out: &output}
+
+	if err := app.Run(context.Background(), []string{"--help"}); err != nil {
+		t.Fatalf("help: %v", err)
+	}
+	text := output.String()
+	for _, want := range []string{"login", "version", "module create", "module list", "push", "pull", "check-breaking", "gitlab mr-check", "runtime report", "PROTORADAR_SERVER_URL", "PROTORADAR_TOKEN"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("help missing %q:\n%s", want, text)
+		}
+	}
+}
+
+func TestVersionCommandPrintsBuildMetadata(t *testing.T) {
+	var output bytes.Buffer
+	app := App{Out: &output}
+
+	if err := app.Run(context.Background(), []string{"version"}); err != nil {
+		t.Fatalf("version: %v", err)
+	}
+	text := output.String()
+	for _, want := range []string{"version:", "commit:", "build_date:"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("version output missing %q: %q", want, text)
+		}
+	}
+}
+
 func TestLoginRejectsInvalidServerURL(t *testing.T) {
 	app := App{}
 
@@ -1103,6 +1133,37 @@ func TestGitLabMRCheckPassedAndBreakingExitCodes(t *testing.T) {
 	}
 }
 
+func TestGitLabMRCheckFetchesRuntimeImpact(t *testing.T) {
+	state := newMRCheckServerState(breakingMRReport())
+	state.runtimeImpactBody = map[string]any{
+		"report_id": "report-2",
+		"impacts": []map[string]any{{
+			"service_name":  "billing-service",
+			"environment":   "production",
+			"used_module":   "user-api",
+			"used_version":  "v1.2.0",
+			"git_commit":    "abc1234",
+			"build_version": "2026.06.04-15",
+			"impact_status": "potentially_affected_by_breaking_change",
+			"reason":        "exact version match",
+			"reported_at":   "2026-06-04T12:00:00Z",
+		}},
+	}
+	server := gitLabMRCheckServer(t, state)
+	defer server.Close()
+
+	_, err := runGitLabMRCheckAgainstServer(t, server, []string{"gitlab", "mr-check", "--module", "user-api", "--path", validWorkspace(t), "--against", "latest", "--gitlab-base-url", server.URL, "--project-id", "123", "--merge-request-iid", "7", "--commit-sha", "abc123", "--gitlab-token", "gitlab_secret"})
+	if exitCode(err) != 1 {
+		t.Fatalf("err=%v exit=%d", err, exitCode(err))
+	}
+	if state.runtimeImpactCalls != 1 || state.runtimeImpactReportID != "report-2" {
+		t.Fatalf("runtime impact calls=%d reportID=%q", state.runtimeImpactCalls, state.runtimeImpactReportID)
+	}
+	if len(state.createdNoteBodies) != 1 || !strings.Contains(state.createdNoteBodies[0], "| `billing-service` | `production` | `user-api@v1.2.0` | `2026.06.04-15` | `abc1234` |") {
+		t.Fatalf("created note bodies = %#v", state.createdNoteBodies)
+	}
+}
+
 func TestGitLabMRCheckToolOrGitLabErrorExitsTwo(t *testing.T) {
 	toolState := newMRCheckServerState(map[string]string{"error": "buf failed"})
 	toolState.breakingStatus = http.StatusInternalServerError
@@ -1181,23 +1242,30 @@ func TestGitLabMRCheckDoesNotPrintRawTokens(t *testing.T) {
 }
 
 type mrCheckServerState struct {
-	breakingStatus   int
-	breakingBody     any
-	createNoteStatus int
-	notes            []map[string]any
-	gotAgainst       string
-	gotTargetRef     string
-	createdBodies    int
-	updatedBodies    int
-	statuses         []map[string]string
+	breakingStatus        int
+	breakingBody          any
+	runtimeImpactStatus   int
+	runtimeImpactBody     any
+	runtimeImpactCalls    int
+	runtimeImpactReportID string
+	createNoteStatus      int
+	notes                 []map[string]any
+	gotAgainst            string
+	gotTargetRef          string
+	createdBodies         int
+	createdNoteBodies     []string
+	updatedBodies         int
+	statuses              []map[string]string
 }
 
 func newMRCheckServerState(body any) *mrCheckServerState {
 	return &mrCheckServerState{
-		breakingStatus:   http.StatusOK,
-		breakingBody:     body,
-		createNoteStatus: http.StatusCreated,
-		notes:            []map[string]any{},
+		breakingStatus:      http.StatusOK,
+		breakingBody:        body,
+		runtimeImpactStatus: http.StatusOK,
+		runtimeImpactBody:   map[string]any{"report_id": "report-1", "impacts": []map[string]any{}},
+		createNoteStatus:    http.StatusCreated,
+		notes:               []map[string]any{},
 	}
 }
 
@@ -1252,6 +1320,15 @@ func handleProtoRadarMRCheckRequest(t *testing.T, state *mrCheckServerState, w h
 		w.WriteHeader(http.StatusUnauthorized)
 		return
 	}
+	if r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/api/v1/breaking-reports/") && strings.HasSuffix(r.URL.Path, "/runtime-impact") {
+		parts := strings.Split(r.URL.Path, "/")
+		if len(parts) >= 5 {
+			state.runtimeImpactReportID = parts[4]
+		}
+		state.runtimeImpactCalls++
+		writeJSON(t, w, state.runtimeImpactStatus, state.runtimeImpactBody)
+		return
+	}
 	if r.Method != http.MethodPost || r.URL.Path != "/api/v1/modules/user-api/breaking-checks" {
 		w.WriteHeader(http.StatusNotFound)
 		return
@@ -1289,6 +1366,7 @@ func handleGitLabMRCheckRequest(t *testing.T, state *mrCheckServerState, w http.
 			return
 		}
 		state.createdBodies++
+		state.createdNoteBodies = append(state.createdNoteBodies, req["body"])
 		writeJSON(t, w, http.StatusCreated, map[string]any{"id": state.createdBodies, "body": req["body"]})
 	case r.Method == http.MethodPut && r.URL.Path == "/api/v4/projects/123/merge_requests/7/notes/44":
 		var req map[string]string
@@ -1385,8 +1463,272 @@ func affectedModulesResponse() map[string]any {
 
 func saveCLIConfig(t *testing.T, path string, serverURL string) {
 	t.Helper()
-	if err := config.Save(path, config.Config{ServerURL: serverURL, Token: "prr_token"}); err != nil {
+	saveCLIConfigWithToken(t, path, serverURL, "prr_token")
+}
+
+func saveCLIConfigWithToken(t *testing.T, path string, serverURL string, token string) {
+	t.Helper()
+	if err := config.Save(path, config.Config{ServerURL: serverURL, Token: token}); err != nil {
 		t.Fatalf("save config: %v", err)
+	}
+}
+
+func runtimeReportServer(t *testing.T, handler func(http.ResponseWriter, *http.Request)) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer prr_token" && r.Header.Get("Authorization") != "Bearer prr_super_secret" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		if r.Method != http.MethodPost || r.URL.Path != "/api/v1/runtime/reports" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		handler(w, r)
+	}))
+}
+
+func runRuntimeReportAgainstServer(t *testing.T, server *httptest.Server, args []string) (string, error) {
+	t.Helper()
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	saveCLIConfig(t, configPath, server.URL)
+	var output bytes.Buffer
+	app := App{ConfigPath: configPath, HTTPClient: server.Client(), Out: &output}
+	err := app.Run(context.Background(), args)
+	return output.String(), err
+}
+
+func writeRuntimeReportResponse(t *testing.T, w http.ResponseWriter, request map[string]any, usages []map[string]any) {
+	t.Helper()
+	writeJSON(t, w, http.StatusCreated, map[string]any{
+		"deployment_id": "deployment-1",
+		"service_name":  request["service_name"],
+		"environment":   request["environment"],
+		"git_commit":    request["git_commit"],
+		"build_version": request["build_version"],
+		"reported_at":   "2026-06-04T12:00:00Z",
+		"usages":        usages,
+	})
+}
+
+func TestRuntimeReportRequiresService(t *testing.T) {
+	app := App{ConfigPath: filepath.Join(t.TempDir(), "missing.yaml")}
+	err := app.Run(context.Background(), []string{"runtime", "report", "--environment", "production", "--git-commit", "abc123", "--build-version", "build-1", "--module", "user-api@v1.0.0"})
+	if exitCode(err) != 2 || err == nil || !strings.Contains(err.Error(), "--service") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestRuntimeReportRequiresEnvironment(t *testing.T) {
+	app := App{ConfigPath: filepath.Join(t.TempDir(), "missing.yaml")}
+	err := app.Run(context.Background(), []string{"runtime", "report", "--service", "billing-service", "--git-commit", "abc123", "--build-version", "build-1", "--module", "user-api@v1.0.0"})
+	if exitCode(err) != 2 || err == nil || !strings.Contains(err.Error(), "--environment") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestRuntimeReportRequiresModule(t *testing.T) {
+	app := App{ConfigPath: filepath.Join(t.TempDir(), "missing.yaml")}
+	err := app.Run(context.Background(), []string{"runtime", "report", "--service", "billing-service", "--environment", "production", "--git-commit", "abc123", "--build-version", "build-1"})
+	if exitCode(err) != 2 || err == nil || !strings.Contains(err.Error(), "module") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestRuntimeReportInvalidModuleFormatExitsTwo(t *testing.T) {
+	app := App{ConfigPath: filepath.Join(t.TempDir(), "missing.yaml")}
+	err := app.Run(context.Background(), []string{"runtime", "report", "--service", "billing-service", "--environment", "production", "--git-commit", "abc123", "--build-version", "build-1", "--module", "user-api"})
+	if exitCode(err) != 2 || err == nil || !strings.Contains(err.Error(), "module@version") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestRuntimeReportCallsExpectedAPIEndpointAndPayload(t *testing.T) {
+	var gotPath string
+	var gotAuth string
+	var payload map[string]any
+	server := runtimeReportServer(t, func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotAuth = r.Header.Get("Authorization")
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		writeRuntimeReportResponse(t, w, payload, []map[string]any{
+			{"module": "user-api", "version": "v1.2.0", "latest_version": "v1.5.0", "drift_status": "behind_latest", "drift_reason": "behind_latest: latest version is v1.5.0"},
+			{"module": "billing-api", "version": "v1.4.0", "drift_status": "up_to_date", "drift_reason": "up_to_date"},
+		})
+	})
+	defer server.Close()
+
+	output, err := runRuntimeReportAgainstServer(t, server, []string{
+		"runtime", "report",
+		"--service", "billing-service",
+		"--environment", "production",
+		"--git-commit", "abc1234",
+		"--build-version", "2026.06.04-15",
+		"--module", "user-api@v1.2.0",
+		"--module", "billing-api@v1.4.0",
+	})
+	if err != nil {
+		t.Fatalf("runtime report: %v", err)
+	}
+	if gotPath != "/api/v1/runtime/reports" || gotAuth != "Bearer prr_token" {
+		t.Fatalf("path/auth = %s/%s", gotPath, gotAuth)
+	}
+	if payload["service_name"] != "billing-service" || payload["environment"] != "production" || payload["git_commit"] != "abc1234" || payload["build_version"] != "2026.06.04-15" {
+		t.Fatalf("payload = %#v", payload)
+	}
+	modules, ok := payload["modules"].([]any)
+	if !ok || len(modules) != 2 {
+		t.Fatalf("modules = %#v", payload["modules"])
+	}
+	if !strings.Contains(output, "Runtime inventory reported") || !strings.Contains(output, "user-api@v1.2.0 - behind latest (latest: v1.5.0)") || !strings.Contains(output, "billing-api@v1.4.0 - up to date") {
+		t.Fatalf("output = %q", output)
+	}
+}
+
+func TestRuntimeReportUsesGitLabEnvDefaults(t *testing.T) {
+	var payload map[string]any
+	server := runtimeReportServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		writeRuntimeReportResponse(t, w, payload, []map[string]any{{"module": "user-api", "version": "v1.0.0", "drift_status": "up_to_date", "drift_reason": "up_to_date"}})
+	})
+	defer server.Close()
+	t.Setenv("PROTORADAR_SERVER_URL", server.URL)
+	t.Setenv("PROTORADAR_TOKEN", "prr_token")
+	t.Setenv("CI_PROJECT_NAME", "billing-service")
+	t.Setenv("CI_ENVIRONMENT_NAME", "production")
+	t.Setenv("CI_COMMIT_SHA", "abc1234")
+	t.Setenv("CI_COMMIT_SHORT_SHA", "abc1234")
+
+	var output bytes.Buffer
+	app := App{ConfigPath: filepath.Join(t.TempDir(), "missing.yaml"), HTTPClient: server.Client(), Out: &output}
+	err := app.Run(context.Background(), []string{"runtime", "report", "--module", "user-api@v1.0.0"})
+	if err != nil {
+		t.Fatalf("runtime report: %v", err)
+	}
+	if payload["service_name"] != "billing-service" || payload["environment"] != "production" || payload["git_commit"] != "abc1234" || payload["build_version"] != "abc1234" {
+		t.Fatalf("payload = %#v", payload)
+	}
+}
+
+func TestRuntimeReportReadsFromFile(t *testing.T) {
+	var payload map[string]any
+	server := runtimeReportServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		writeRuntimeReportResponse(t, w, payload, []map[string]any{{"module": "user-api", "version": "v1.2.0", "drift_status": "up_to_date", "drift_reason": "up_to_date"}})
+	})
+	defer server.Close()
+
+	file := filepath.Join(t.TempDir(), "protoradar-runtime.yaml")
+	writeFile(t, file, "service_name: billing-service\nenvironment: production\ngit_commit: abc1234\nbuild_version: build-1\nmodules:\n  - module: user-api\n    version: v1.2.0\n")
+	_, err := runRuntimeReportAgainstServer(t, server, []string{"runtime", "report", "--from-file", file})
+	if err != nil {
+		t.Fatalf("runtime report: %v", err)
+	}
+	if payload["service_name"] != "billing-service" || payload["environment"] != "production" {
+		t.Fatalf("payload = %#v", payload)
+	}
+}
+
+func TestRuntimeReportFlagsOverrideFileAndModulesReplaceFileModules(t *testing.T) {
+	var payload map[string]any
+	server := runtimeReportServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		writeRuntimeReportResponse(t, w, payload, []map[string]any{{"module": "billing-api", "version": "v1.4.0", "drift_status": "up_to_date", "drift_reason": "up_to_date"}})
+	})
+	defer server.Close()
+
+	file := filepath.Join(t.TempDir(), "protoradar-runtime.yaml")
+	writeFile(t, file, "service_name: file-service\nenvironment: file-env\ngit_commit: file-commit\nbuild_version: file-build\nmodules:\n  - module: user-api\n    version: v1.2.0\n")
+	_, err := runRuntimeReportAgainstServer(t, server, []string{"runtime", "report", "--from-file", file, "--service", "billing-service", "--environment", "production", "--git-commit", "abc1234", "--build-version", "build-1", "--module", "billing-api@v1.4.0"})
+	if err != nil {
+		t.Fatalf("runtime report: %v", err)
+	}
+	if payload["service_name"] != "billing-service" || payload["environment"] != "production" || payload["git_commit"] != "abc1234" || payload["build_version"] != "build-1" {
+		t.Fatalf("payload = %#v", payload)
+	}
+	modules := payload["modules"].([]any)
+	if len(modules) != 1 || modules[0].(map[string]any)["module"] != "billing-api" {
+		t.Fatalf("modules = %#v", modules)
+	}
+}
+
+func TestRuntimeReportBehindLatestAndUnknownVersionExitZero(t *testing.T) {
+	server := runtimeReportServer(t, func(w http.ResponseWriter, r *http.Request) {
+		var payload map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		writeRuntimeReportResponse(t, w, payload, []map[string]any{
+			{"module": "user-api", "version": "v1.2.0", "latest_version": "v1.5.0", "drift_status": "behind_latest", "drift_reason": "behind_latest: latest version is v1.5.0"},
+			{"module": "missing-api", "version": "v9.9.9", "drift_status": "unknown_version", "drift_reason": "module_not_found"},
+		})
+	})
+	defer server.Close()
+
+	output, err := runRuntimeReportAgainstServer(t, server, []string{"runtime", "report", "--service", "billing-service", "--environment", "production", "--git-commit", "abc1234", "--build-version", "build-1", "--module", "user-api@v1.2.0", "--module", "missing-api@v9.9.9"})
+	if exitCode(err) != 0 {
+		t.Fatalf("error = %v", err)
+	}
+	if !strings.Contains(output, "behind latest") || !strings.Contains(output, "unknown version") {
+		t.Fatalf("output = %q", output)
+	}
+}
+
+func TestRuntimeReportAuthNetworkAndServerErrorsExitTwo(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		status int
+	}{
+		{name: "auth", status: http.StatusUnauthorized},
+		{name: "server", status: http.StatusInternalServerError},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			server := runtimeReportServer(t, func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tt.status)
+			})
+			defer server.Close()
+			_, err := runRuntimeReportAgainstServer(t, server, []string{"runtime", "report", "--service", "billing-service", "--environment", "production", "--git-commit", "abc1234", "--build-version", "build-1", "--module", "user-api@v1.0.0"})
+			if exitCode(err) != 2 {
+				t.Fatalf("error = %v", err)
+			}
+		})
+	}
+
+	app := App{ConfigPath: filepath.Join(t.TempDir(), "missing.yaml")}
+	err := app.Run(context.Background(), []string{"runtime", "report", "--service", "billing-service", "--environment", "production", "--git-commit", "abc1234", "--build-version", "build-1", "--module", "user-api@v1.0.0"})
+	if exitCode(err) != 2 {
+		t.Fatalf("network/config error = %v", err)
+	}
+}
+
+func TestRuntimeReportDoesNotPrintRawToken(t *testing.T) {
+	server := runtimeReportServer(t, func(w http.ResponseWriter, r *http.Request) {
+		var payload map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		writeRuntimeReportResponse(t, w, payload, []map[string]any{{"module": "user-api", "version": "v1.0.0", "drift_status": "up_to_date", "drift_reason": "up_to_date"}})
+	})
+	defer server.Close()
+
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	saveCLIConfigWithToken(t, configPath, server.URL, "prr_super_secret")
+	var output bytes.Buffer
+	app := App{ConfigPath: configPath, HTTPClient: server.Client(), Out: &output}
+	err := app.Run(context.Background(), []string{"runtime", "report", "--service", "billing-service", "--environment", "production", "--git-commit", "abc1234", "--build-version", "build-1", "--module", "user-api@v1.0.0"})
+	if err != nil {
+		t.Fatalf("runtime report: %v", err)
+	}
+	if strings.Contains(output.String(), "prr_super_secret") {
+		t.Fatalf("raw token printed: %q", output.String())
 	}
 }
 

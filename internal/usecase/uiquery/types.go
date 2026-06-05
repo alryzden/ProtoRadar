@@ -31,6 +31,28 @@ type GetModuleDependencyGraphInput struct {
 	Module string
 }
 
+type ListRuntimeServicesInput struct {
+	Query       string
+	Environment string
+	DriftStatus string
+}
+
+type GetRuntimeServiceDetailsInput struct {
+	Service string
+}
+
+type GetRuntimeEnvironmentInventoryInput struct {
+	Environment string
+}
+
+type GetModuleRuntimeUsagesInput struct {
+	Module string
+}
+
+type GetBreakingReportRuntimeImpactInput struct {
+	ReportID string
+}
+
 type ModuleOverview struct {
 	Module              ModuleInfo
 	GitLabProject       *GitLabProjectInfo
@@ -189,6 +211,7 @@ type BreakingReportDetails struct {
 	Summary         string
 	Changes         []BreakingChangeSummary
 	AffectedModules []DependencyModule
+	RuntimeImpact   []RuntimeImpact
 }
 
 type BreakingChangeSummary struct {
@@ -221,4 +244,75 @@ type UnresolvedDependency struct {
 	ImportPath       string
 	ReferencedSymbol string
 	Reason           string
+}
+
+type RuntimeServiceSummary struct {
+	ServiceName         string
+	Environments        []string
+	LastReportedAt      *time.Time
+	UpToDateCount       int
+	BehindLatestCount   int
+	UnknownVersionCount int
+	DeprecatedCount     int
+}
+
+type RuntimeServiceDetails struct {
+	ServiceName string
+	Deployments []RuntimeDeployment
+	Usages      []RuntimeModuleUsage
+}
+
+type RuntimeEnvironmentInventory struct {
+	Environment string
+	Deployments []RuntimeDeployment
+	Usages      []RuntimeModuleUsage
+}
+
+type RuntimeDeployment struct {
+	ID           string
+	ServiceName  string
+	Environment  string
+	GitCommit    string
+	BuildVersion string
+	ReportedAt   time.Time
+	CreatedAt    time.Time
+}
+
+type RuntimeModuleUsage struct {
+	DeploymentID  string
+	Module        string
+	Version       string
+	LatestVersion string
+	DriftStatus   string
+	DriftReason   string
+}
+
+type ModuleRuntimeUsage struct {
+	ServiceName   string
+	Environment   string
+	Module        string
+	Version       string
+	LatestVersion string
+	GitCommit     string
+	BuildVersion  string
+	ReportedAt    time.Time
+	DriftStatus   string
+	DriftReason   string
+}
+
+type ModuleRuntimeUsages struct {
+	Module string
+	Usages []ModuleRuntimeUsage
+}
+
+type RuntimeImpact struct {
+	ServiceName  string
+	Environment  string
+	UsedModule   string
+	UsedVersion  string
+	GitCommit    string
+	BuildVersion string
+	ReportedAt   time.Time
+	ImpactStatus string
+	Reason       string
 }

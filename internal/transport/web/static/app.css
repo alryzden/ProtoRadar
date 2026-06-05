@@ -221,26 +221,31 @@ button:disabled {
 }
 
 .badge-published,
-.badge-passed {
+.badge-passed,
+.badge-up-to-date {
   color: var(--green);
   border-color: rgba(30, 110, 77, 0.25);
   background: var(--green-bg);
 }
 
 .badge-breaking,
-.badge-failed {
+.badge-failed,
+.badge-deprecated-version,
+.badge-runtime-impact {
   color: var(--red);
   border-color: rgba(166, 63, 50, 0.25);
   background: var(--red-bg);
 }
 
-.badge-warning {
+.badge-warning,
+.badge-behind-latest {
   color: var(--yellow);
   border-color: rgba(128, 96, 24, 0.25);
   background: var(--yellow-bg);
 }
 
-.badge-unknown {
+.badge-unknown,
+.badge-unknown-version {
   color: var(--gray);
   border-color: rgba(82, 96, 91, 0.22);
   background: var(--gray-bg);

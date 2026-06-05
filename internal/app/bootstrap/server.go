@@ -12,6 +12,7 @@ import (
 	"github.com/alryzden/ProtoRadar/internal/repository/postgres"
 	"github.com/alryzden/ProtoRadar/internal/usecase/dependencygraph"
 	"github.com/alryzden/ProtoRadar/internal/usecase/registry"
+	"github.com/alryzden/ProtoRadar/internal/usecase/runtimeinventory"
 	"github.com/alryzden/ProtoRadar/internal/usecase/uiquery"
 )
 
@@ -76,6 +77,7 @@ func NewServer(ctx context.Context, cfg config.RuntimeConfig, migrations fs.FS) 
 	metadataRepo := postgres.NewDescriptorMetadataRepository(db)
 	breakingReportRepo := postgres.NewBreakingReportRepository(db)
 	dependencyRepo := postgres.NewModuleDependencyRepository(db)
+	runtimeInventoryRepo := postgres.NewRuntimeInventoryRepository(db)
 	tokenRepo := postgres.NewAPITokenRepository(db)
 	outboxWriter := postgres.NewOutboxWriter(db)
 	clock := registry.SystemClock{}
@@ -122,6 +124,16 @@ func NewServer(ctx context.Context, cfg config.RuntimeConfig, migrations fs.FS) 
 			BreakingDefaultAgainst:         cfg.Breaking.DefaultAgainst,
 		},
 	)
+	runtimeInventoryService := runtimeinventory.NewService(
+		moduleRepo,
+		versionRepo,
+		runtimeInventoryRepo,
+		breakingReportRepo,
+		db,
+		outboxWriter,
+		clock,
+		ids,
+	)
 	uiQueryService := uiquery.NewService(
 		moduleRepo,
 		gitLabProjectRepo,
@@ -131,9 +143,10 @@ func NewServer(ctx context.Context, cfg config.RuntimeConfig, migrations fs.FS) 
 		metadataRepo,
 		breakingReportRepo,
 		dependencyRepo,
+		runtimeInventoryRepo,
 	)
 
-	handler, err := NewHTTPHandler(registryService, uiQueryService, cfg, pool.Ping)
+	handler, err := NewHTTPHandler(registryService, runtimeInventoryService, uiQueryService, cfg, pool.Ping)
 	if err != nil {
 		pool.Close()
 		return nil, err

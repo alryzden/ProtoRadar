@@ -1,6 +1,6 @@
 # Breaking Change Checks
 
-Phase 3 adds server-side breaking-change checks for Buf-compatible protobuf workspaces. Developers and CI pipelines can compare a proposed workspace against a previously published module version and receive a structured report plus a human-readable summary.
+Community v1.0 adds server-side breaking-change checks for Buf-compatible protobuf workspaces. Developers and CI pipelines can compare a proposed workspace against a previously published module version and receive a structured report plus a human-readable summary.
 
 Breaking changes are normal check results. A check that finds breaking changes returns `status=breaking`; it is not an HTTP/server failure.
 
@@ -84,7 +84,7 @@ The template writes a human-readable report artifact and passes `--target-ref "$
 
 For GitLab merge request comments and commit statuses, use `examples/gitlab/protoradar-mr-check.yml` and the `protoradar gitlab mr-check` command. See [GitLab CI Integration](gitlab-ci.md) and [GitLab Merge Request Bot](gitlab-mr-bot.md) for the full CI setup.
 
-For local/demo inspection, stored reports can also be viewed in the read-only Basic Web UI at `/ui/breaking-reports`. Report detail pages include potentially affected modules when direct downstream consumers are known. See [Basic Web UI](web-ui.md) and [Dependency Graph MVP](dependency-graph.md).
+For local/demo inspection, stored reports can also be viewed in the read-only Basic Web UI at `/ui/breaking-reports`. Report detail pages include potentially affected modules when direct downstream consumers are known and runtime impact when services report usage of the affected base version. See [Basic Web UI](web-ui.md), [Dependency Graph MVP](dependency-graph.md), and [Runtime Contract Inventory](runtime-inventory.md).
 
 ## Example Workflow
 
@@ -93,16 +93,16 @@ Publish a baseline:
 ```sh
 protoradar push user-api \
   --version v1.0.0 \
-  --path examples/user-api
+  --path examples/repos/user-api
 ```
 
-Modify `examples/user-api/proto/user/v1/user.proto` in a breaking way, for example change a field type or remove an RPC.
+Modify `examples/repos/user-api/proto/user/v1/user.proto` in a breaking way, for example change a field type or remove an RPC.
 
 Run a check:
 
 ```sh
 protoradar check-breaking user-api \
-  --path examples/user-api \
+  --path examples/repos/user-api \
   --against latest
 ```
 
@@ -167,6 +167,14 @@ curl -sS \
   http://localhost:8080/api/v1/breaking-reports/<report_id>/affected-modules
 ```
 
+Retrieve runtime services using the exact base module version from a stored report:
+
+```sh
+curl -sS \
+  -H "Authorization: Bearer <token>" \
+  http://localhost:8080/api/v1/breaking-reports/<report_id>/runtime-impact
+```
+
 Create-check responses use HTTP `200` for both `passed` and `breaking` statuses. Request, auth, baseline, archive, tool, or internal failures use error status codes.
 
 The Basic Web UI exposes the same stored report data:
@@ -192,7 +200,9 @@ Reports include:
 - `human_summary`: reusable text report for CLI output;
 - `created_at`: report creation time.
 
-Affected-module lookups for reports are based on the current direct dependency graph for the report module. Phase 7 does not include transitive affected-module traversal.
+Affected-module lookups for reports are based on the current direct dependency graph for the report module. Community v1.0 does not include transitive affected-module traversal.
+
+Runtime impact lookups for reports are based on services using the exact base module version from the report. Community v1.0 does not include SemVer range matching or continuous runtime heartbeat detection.
 
 Each change can include:
 
