@@ -87,6 +87,70 @@ func TestRunnerFetchesAffectedModulesAfterBreakingCheck(t *testing.T) {
 	assertContains(t, gitlabClient.createdBodies[0], "billing-api")
 }
 
+func TestRunnerFetchesRuntimeImpactWhenReportIDExists(t *testing.T) {
+	runner, breaking, gitlabClient := newTestRunner()
+	breaking.report = breakingReport()
+	runtimeImpact := &fakeRuntimeImpactClient{items: []RuntimeImpact{{
+		ServiceName:  "billing-service",
+		Environment:  "production",
+		UsedModule:   "user-api",
+		UsedVersion:  "v1.2.0",
+		BuildVersion: "2026.06.04-15",
+		GitCommit:    "abc1234",
+	}}}
+	runner.RuntimeImpactClient = runtimeImpact
+
+	result, err := runner.Run(context.Background(), validInput())
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if result.ExitCode != ExitCodeBreaking {
+		t.Fatalf("result = %#v", result)
+	}
+	if breaking.calls != 1 || runtimeImpact.calls != 1 || runtimeImpact.reportIDs[0] != "report-2" {
+		t.Fatalf("breaking calls=%d runtime calls=%d reportIDs=%#v", breaking.calls, runtimeImpact.calls, runtimeImpact.reportIDs)
+	}
+	assertContains(t, gitlabClient.createdBodies[0], "### Runtime impact")
+	assertContains(t, gitlabClient.createdBodies[0], "| `billing-service` | `production` | `user-api@v1.2.0` | `2026.06.04-15` | `abc1234` |")
+}
+
+func TestRunnerRuntimeImpactFailureDoesNotFailBreakingCheck(t *testing.T) {
+	runner, breaking, gitlabClient := newTestRunner()
+	breaking.report = breakingReport()
+	runner.RuntimeImpactClient = &fakeRuntimeImpactClient{err: errors.New("runtime impact API failed")}
+
+	result, err := runner.Run(context.Background(), validInput())
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if result.ExitCode != ExitCodeBreaking {
+		t.Fatalf("result = %#v", result)
+	}
+	assertContains(t, gitlabClient.createdBodies[0], "Runtime impact could not be loaded. Check CI logs.")
+	assertStatusStates(t, gitlabClient.statuses, gitlab.CommitStatusStateRunning, gitlab.CommitStatusStateFailed)
+}
+
+func TestPassedReportWithoutIDDoesNotFetchRuntimeImpactOrCrash(t *testing.T) {
+	runner, breaking, gitlabClient := newTestRunner()
+	report := passedReport()
+	report.ID = ""
+	breaking.report = report
+	runtimeImpact := &fakeRuntimeImpactClient{err: errors.New("should not be called")}
+	runner.RuntimeImpactClient = runtimeImpact
+
+	result, err := runner.Run(context.Background(), validInput())
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if result.ExitCode != ExitCodePassed {
+		t.Fatalf("result = %#v", result)
+	}
+	if runtimeImpact.calls != 0 {
+		t.Fatalf("runtime impact calls = %d", runtimeImpact.calls)
+	}
+	assertContains(t, gitlabClient.createdBodies[0], "No runtime services are currently known to use the affected module version.")
+}
+
 func TestBreakingCheckUpdatesExistingMRComment(t *testing.T) {
 	runner, breaking, gitlabClient := newTestRunner()
 	breaking.report = breakingReport()
@@ -387,6 +451,22 @@ type fakeAffectedModulesClient struct {
 func (fake *fakeAffectedModulesClient) ListAffectedModules(ctx context.Context, module string) ([]AffectedModule, error) {
 	fake.calls++
 	fake.modules = append(fake.modules, module)
+	if fake.err != nil {
+		return nil, fake.err
+	}
+	return fake.items, nil
+}
+
+type fakeRuntimeImpactClient struct {
+	items     []RuntimeImpact
+	err       error
+	calls     int
+	reportIDs []string
+}
+
+func (fake *fakeRuntimeImpactClient) ListRuntimeImpact(ctx context.Context, reportID string) ([]RuntimeImpact, error) {
+	fake.calls++
+	fake.reportIDs = append(fake.reportIDs, reportID)
 	if fake.err != nil {
 		return nil, fake.err
 	}

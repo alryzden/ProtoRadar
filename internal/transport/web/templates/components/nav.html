@@ -3,6 +3,7 @@
   <a class="brand" href="{{.BasePath}}/modules" aria-label="ProtoRadar modules">ProtoRadar</a>
   <nav class="nav" aria-label="Main navigation">
     <a class="nav-link {{if eq .Active "modules"}}is-active{{end}}" href="{{.BasePath}}/modules">Modules</a>
+    <a class="nav-link {{if eq .Active "runtime"}}is-active{{end}}" href="{{.BasePath}}/runtime/services">Runtime</a>
     <a class="nav-link {{if eq .Active "breaking-reports"}}is-active{{end}}" href="{{.BasePath}}/breaking-reports">Breaking Reports</a>
   </nav>
 </header>

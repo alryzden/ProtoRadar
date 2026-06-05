@@ -1,0 +1,9 @@
+service_name: notification-service
+environment: production
+git_commit: demo-notification-commit
+build_version: demo-v1
+modules:
+  - module: user-api
+    version: v1.0.0
+  - module: notification-api
+    version: v1.0.0

@@ -2,71 +2,91 @@ services:
   postgres:
     image: postgres:17-alpine
     environment:
-      POSTGRES_DB: protoradar
-      POSTGRES_USER: protoradar
-      POSTGRES_PASSWORD: protoradar
+      POSTGRES_DB: ${POSTGRES_DB:-protoradar}
+      POSTGRES_USER: ${POSTGRES_USER:-protoradar}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-protoradar}
     ports:
-      - "5432:5432"
+      - "${POSTGRES_PORT:-5432}:5432"
     volumes:
       - postgres-data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U protoradar -d protoradar"]
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
       interval: 5s
       timeout: 5s
       retries: 20
 
   minio:
-    image: minio/minio:latest
+    image: minio/minio:RELEASE.2025-05-24T17-08-30Z
     command: server /data --console-address ":9001"
     environment:
-      MINIO_ROOT_USER: minio
-      MINIO_ROOT_PASSWORD: miniosecret
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minio}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-miniosecret}
     ports:
-      - "9000:9000"
-      - "9001:9001"
+      - "${MINIO_API_PORT:-9000}:9000"
+      - "${MINIO_CONSOLE_PORT:-9001}:9001"
     volumes:
       - minio-data:/data
 
   minio-init:
-    image: minio/mc:latest
+    image: minio/mc:RELEASE.2025-05-21T01-59-54Z
     depends_on:
       - minio
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minio}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-miniosecret}
+      PROTORADAR_STORAGE_S3_BUCKET: ${PROTORADAR_STORAGE_S3_BUCKET:-protoradar}
     entrypoint: >
       /bin/sh -c "
-      until mc alias set local http://minio:9000 minio miniosecret; do sleep 1; done &&
-      mc mb --ignore-existing local/protoradar
+      until mc alias set local http://minio:9000 \"$${MINIO_ROOT_USER}\" \"$${MINIO_ROOT_PASSWORD}\"; do sleep 1; done &&
+      mc mb --ignore-existing \"local/$${PROTORADAR_STORAGE_S3_BUCKET}\"
       "
 
   protoradar-server:
-    build: .
+    build:
+      context: .
+      args:
+        VERSION: ${PROTORADAR_VERSION:-dev}
+        COMMIT: ${PROTORADAR_COMMIT:-unknown}
+        BUILD_DATE: ${PROTORADAR_BUILD_DATE:-unknown}
     depends_on:
       postgres:
         condition: service_healthy
       minio-init:
         condition: service_completed_successfully
     environment:
-      PROTORADAR_HTTP_ADDR: ":8080"
-      PROTORADAR_DATABASE_URL: postgres://protoradar:protoradar@postgres:5432/protoradar?sslmode=disable
-      PROTORADAR_STORAGE_S3_ENDPOINT: http://minio:9000
-      PROTORADAR_STORAGE_S3_REGION: us-east-1
-      PROTORADAR_STORAGE_S3_BUCKET: protoradar
-      PROTORADAR_STORAGE_S3_ACCESS_KEY: minio
-      PROTORADAR_STORAGE_S3_SECRET_KEY: miniosecret
-      PROTORADAR_STORAGE_S3_USE_PATH_STYLE: "true"
-      PROTORADAR_AUTH_TOKEN_HASH_SECRET: local-dev-token-hash-secret
-      PROTORADAR_AUTH_BOOTSTRAP_TOKEN: local-bootstrap-token
-      PROTORADAR_REGISTRY_MAX_ARTIFACT_SIZE_BYTES: "104857600"
-      PROTORADAR_BUF_BINARY_PATH: buf
-      PROTORADAR_BUF_BUILD_TIMEOUT: 30s
-      PROTORADAR_BUF_LINT_TIMEOUT: 30s
-      PROTORADAR_BUF_LINT_MODE: warn
-      PROTORADAR_BUF_REQUIRE_CONFIG: "true"
-      PROTORADAR_BUF_MAX_REPORT_BYTES: "16384"
-      PROTORADAR_BREAKING_MAX_REPORT_BYTES: "32768"
-      PROTORADAR_BREAKING_MAX_CHANGES: "1000"
-      PROTORADAR_BREAKING_DEFAULT_AGAINST: latest
+      PROTORADAR_HTTP_ADDR: ${PROTORADAR_HTTP_ADDR:-:8080}
+      PROTORADAR_DATABASE_URL: ${PROTORADAR_DATABASE_URL:-postgres://protoradar:protoradar@postgres:5432/protoradar?sslmode=disable}
+      PROTORADAR_STORAGE_S3_ENDPOINT: ${PROTORADAR_STORAGE_S3_ENDPOINT:-http://minio:9000}
+      PROTORADAR_STORAGE_S3_REGION: ${PROTORADAR_STORAGE_S3_REGION:-us-east-1}
+      PROTORADAR_STORAGE_S3_BUCKET: ${PROTORADAR_STORAGE_S3_BUCKET:-protoradar}
+      PROTORADAR_STORAGE_S3_ACCESS_KEY: ${PROTORADAR_STORAGE_S3_ACCESS_KEY:-minio}
+      PROTORADAR_STORAGE_S3_SECRET_KEY: ${PROTORADAR_STORAGE_S3_SECRET_KEY:-miniosecret}
+      PROTORADAR_STORAGE_S3_USE_PATH_STYLE: ${PROTORADAR_STORAGE_S3_USE_PATH_STYLE:-true}
+      PROTORADAR_AUTH_TOKEN_HASH_SECRET: ${PROTORADAR_AUTH_TOKEN_HASH_SECRET:-local-dev-token-hash-secret}
+      PROTORADAR_AUTH_BOOTSTRAP_TOKEN: ${PROTORADAR_AUTH_BOOTSTRAP_TOKEN:-local-bootstrap-token}
+      PROTORADAR_MAX_REQUEST_BODY_BYTES: ${PROTORADAR_MAX_REQUEST_BODY_BYTES:-115343360}
+      PROTORADAR_REGISTRY_MAX_ARTIFACT_SIZE_BYTES: ${PROTORADAR_REGISTRY_MAX_ARTIFACT_SIZE_BYTES:-104857600}
+      PROTORADAR_BUF_BINARY_PATH: ${PROTORADAR_BUF_BINARY_PATH:-buf}
+      PROTORADAR_BUF_BUILD_TIMEOUT: ${PROTORADAR_BUF_BUILD_TIMEOUT:-30s}
+      PROTORADAR_BUF_LINT_TIMEOUT: ${PROTORADAR_BUF_LINT_TIMEOUT:-30s}
+      PROTORADAR_BUF_LINT_MODE: ${PROTORADAR_BUF_LINT_MODE:-warn}
+      PROTORADAR_BUF_REQUIRE_CONFIG: ${PROTORADAR_BUF_REQUIRE_CONFIG:-true}
+      PROTORADAR_BUF_MAX_REPORT_BYTES: ${PROTORADAR_BUF_MAX_REPORT_BYTES:-16384}
+      PROTORADAR_BREAKING_MAX_REPORT_BYTES: ${PROTORADAR_BREAKING_MAX_REPORT_BYTES:-32768}
+      PROTORADAR_BREAKING_MAX_CHANGES: ${PROTORADAR_BREAKING_MAX_CHANGES:-1000}
+      PROTORADAR_BREAKING_DEFAULT_AGAINST: ${PROTORADAR_BREAKING_DEFAULT_AGAINST:-latest}
+      PROTORADAR_UI_ENABLED: ${PROTORADAR_UI_ENABLED:-true}
+      PROTORADAR_UI_BASE_PATH: ${PROTORADAR_UI_BASE_PATH:-/ui}
+      PROTORADAR_UI_STATIC_PATH: ${PROTORADAR_UI_STATIC_PATH:-/ui/static}
+      PROTORADAR_LOG_LEVEL: ${PROTORADAR_LOG_LEVEL:-info}
+      PROTORADAR_LOG_FORMAT: ${PROTORADAR_LOG_FORMAT:-json}
     ports:
-      - "8080:8080"
+      - "${PROTORADAR_HTTP_PORT:-8080}:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/healthz >/dev/null"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
 
 volumes:
   postgres-data:

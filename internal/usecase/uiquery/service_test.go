@@ -286,7 +286,7 @@ type fixture struct {
 }
 
 func (fixture *fixture) service() *Service {
-	return NewService(fixture.modules, fixture.gitlab, fixture.versions, fixture.artifacts, fixture.bufConfigs, fixture.metadata, fixture.reports, fixture.dependencies)
+	return NewService(fixture.modules, fixture.gitlab, fixture.versions, fixture.artifacts, fixture.bufConfigs, fixture.metadata, fixture.reports, fixture.dependencies, nil)
 }
 
 func module(name string, description string, repositoryURL string, updatedAt time.Time) domain.Module {

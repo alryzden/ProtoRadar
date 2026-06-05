@@ -12,6 +12,7 @@ import (
 const (
 	DefaultMaxDisplayedChanges         = 50
 	DefaultMaxDisplayedAffectedModules = 20
+	DefaultMaxDisplayedRuntimeImpacts  = 20
 	statusPassed                       = "passed"
 	statusBreaking                     = "breaking"
 	statusFailed                       = "failed"
@@ -24,16 +25,18 @@ var secretPatterns = []*regexp.Regexp{
 }
 
 type Report struct {
-	Module          string
-	Against         string
-	TargetRef       string
-	Status          string
-	ChangeCount     int
-	Changes         []Change
-	AffectedModules []AffectedModule
-	ReportID        string
-	TargetURL       string
-	CommitSHA       string
+	Module                   string
+	Against                  string
+	TargetRef                string
+	Status                   string
+	ChangeCount              int
+	Changes                  []Change
+	AffectedModules          []AffectedModule
+	RuntimeImpacts           []RuntimeImpact
+	RuntimeImpactUnavailable bool
+	ReportID                 string
+	TargetURL                string
+	CommitSHA                string
 }
 
 type Change struct {
@@ -50,9 +53,19 @@ type AffectedModule struct {
 	Reasons           []string
 }
 
+type RuntimeImpact struct {
+	ServiceName  string
+	Environment  string
+	UsedModule   string
+	UsedVersion  string
+	BuildVersion string
+	GitCommit    string
+}
+
 type RenderOptions struct {
 	MaxDisplayedChanges         int
 	MaxDisplayedAffectedModules int
+	MaxDisplayedRuntimeImpacts  int
 }
 
 func BuildMarker(moduleName string) string {
@@ -106,6 +119,10 @@ func RenderReport(report Report, options RenderOptions) string {
 	if maxAffectedModules <= 0 {
 		maxAffectedModules = DefaultMaxDisplayedAffectedModules
 	}
+	maxRuntimeImpacts := options.MaxDisplayedRuntimeImpacts
+	if maxRuntimeImpacts <= 0 {
+		maxRuntimeImpacts = DefaultMaxDisplayedRuntimeImpacts
+	}
 
 	var builder strings.Builder
 	builder.WriteString(BuildMarker(report.Module))
@@ -115,6 +132,7 @@ func RenderReport(report Report, options RenderOptions) string {
 	writeSummary(&builder, report)
 	writeChanges(&builder, report, maxChanges)
 	writeAffectedModules(&builder, report.AffectedModules, maxAffectedModules)
+	writeRuntimeImpact(&builder, report, maxRuntimeImpacts)
 	writeResult(&builder, report.Status)
 	writeMetadata(&builder, report)
 	return builder.String()
@@ -182,6 +200,39 @@ func writeAffectedModules(builder *strings.Builder, affected []AffectedModule, m
 	builder.WriteString("\n")
 	if len(affected) > limit {
 		fmt.Fprintf(builder, "_And %d more modules. See ProtoRadar UI for the full dependency graph._\n\n", len(affected)-limit)
+	}
+}
+
+func writeRuntimeImpact(builder *strings.Builder, report Report, maxRuntimeImpacts int) {
+	builder.WriteString("### Runtime impact\n\n")
+	if report.RuntimeImpactUnavailable {
+		builder.WriteString("Runtime impact could not be loaded. Check CI logs.\n\n")
+		return
+	}
+	if len(report.RuntimeImpacts) == 0 {
+		builder.WriteString("No runtime services are currently known to use the affected module version.\n\n")
+		return
+	}
+
+	limit := len(report.RuntimeImpacts)
+	if limit > maxRuntimeImpacts {
+		limit = maxRuntimeImpacts
+	}
+	builder.WriteString("| Service | Environment | Uses | Build | Commit |\n")
+	builder.WriteString("| --- | --- | --- | --- | --- |\n")
+	for _, impact := range report.RuntimeImpacts[:limit] {
+		uses := defaultIfBlank(impact.UsedModule, report.Module) + "@" + defaultIfBlank(impact.UsedVersion, report.Against)
+		fmt.Fprintf(builder, "| `%s` | `%s` | `%s` | `%s` | `%s` |\n",
+			tableCell(defaultIfBlank(impact.ServiceName, "unknown service")),
+			tableCell(defaultIfBlank(impact.Environment, "unknown environment")),
+			tableCell(defaultIfBlank(uses, "unknown")),
+			tableCell(defaultIfBlank(impact.BuildVersion, "unknown")),
+			tableCell(defaultIfBlank(impact.GitCommit, "unknown")),
+		)
+	}
+	builder.WriteString("\n")
+	if len(report.RuntimeImpacts) > limit {
+		fmt.Fprintf(builder, "_And %d more runtime usages. See ProtoRadar UI for the full runtime inventory._\n\n", len(report.RuntimeImpacts)-limit)
 	}
 }
 

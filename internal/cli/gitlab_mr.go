@@ -19,6 +19,10 @@ func (app App) gitlab(ctx context.Context, args []string) error {
 	if len(args) == 0 {
 		return errors.New("gitlab requires a subcommand")
 	}
+	if isHelp(args[0]) {
+		app.printHelp("gitlab")
+		return nil
+	}
 	switch args[0] {
 	case "mr-check":
 		return app.gitlabMRCheck(ctx, args[1:])
@@ -28,6 +32,10 @@ func (app App) gitlab(ctx context.Context, args []string) error {
 }
 
 func (app App) gitlabMRCheck(ctx context.Context, args []string) error {
+	if hasHelp(args) {
+		app.printHelp("gitlab mr-check")
+		return nil
+	}
 	flags := flag.NewFlagSet("gitlab mr-check", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	module := flags.String("module", envDefault("PROTORADAR_MODULE", ""), "ProtoRadar module name")
@@ -79,6 +87,7 @@ func (app App) gitlabMRCheck(ctx context.Context, args []string) error {
 	runner := mrcheck.Runner{
 		BreakingClient:        breakingClientAdapter{client: protoRadarClient},
 		AffectedModulesClient: affectedModulesClientAdapter{client: protoRadarClient},
+		RuntimeImpactClient:   runtimeImpactClientAdapter{client: protoRadarClient},
 		GitLabClient:          gitlabapi.NewClient(input.GitLabBaseURL, input.GitLabToken, app.HTTPClient),
 	}
 	result, runErr := runner.Run(ctx, mrcheck.Input{
@@ -282,6 +291,29 @@ func (adapter affectedModulesClientAdapter) ListAffectedModules(ctx context.Cont
 			LatestVersion:     item.LatestVersion,
 			DependencySources: append([]string(nil), item.DependencySources...),
 			Reasons:           append([]string(nil), item.Reasons...),
+		})
+	}
+	return items, nil
+}
+
+type runtimeImpactClientAdapter struct {
+	client *api.Client
+}
+
+func (adapter runtimeImpactClientAdapter) ListRuntimeImpact(ctx context.Context, reportID string) ([]mrcheck.RuntimeImpact, error) {
+	impact, err := adapter.client.GetBreakingReportRuntimeImpact(ctx, reportID)
+	if err != nil {
+		return nil, err
+	}
+	items := make([]mrcheck.RuntimeImpact, 0, len(impact.Impacts))
+	for _, item := range impact.Impacts {
+		items = append(items, mrcheck.RuntimeImpact{
+			ServiceName:  item.ServiceName,
+			Environment:  item.Environment,
+			UsedModule:   item.UsedModule,
+			UsedVersion:  item.UsedVersion,
+			BuildVersion: item.BuildVersion,
+			GitCommit:    item.GitCommit,
 		})
 	}
 	return items, nil

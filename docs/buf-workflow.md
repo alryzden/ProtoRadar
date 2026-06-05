@@ -1,6 +1,6 @@
 # Buf-Compatible Workflow
 
-ProtoRadar turns published protobuf module versions into Buf-compatible governance inputs. A publish request uploads a source archive, the server validates it with Buf, stores both source and descriptor artifacts, extracts descriptor metadata, and writes the publish event through the transactional outbox. Phase 3 reuses the stored Buf image artifact as the baseline for breaking-change checks.
+ProtoRadar turns published protobuf module versions into Buf-compatible governance inputs. A publish request uploads a source archive, the server validates it with Buf, stores both source and descriptor artifacts, extracts descriptor metadata, and writes the publish event through the transactional outbox. Community v1.0 reuses the stored Buf image artifact as the baseline for breaking-change checks.
 
 ## Publish Requirements
 

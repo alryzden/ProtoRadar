@@ -25,6 +25,10 @@ type Query interface {
 	GetModuleDependencyGraph(ctx context.Context, input uiquery.GetModuleDependencyGraphInput) (uiquery.ModuleDependencyGraph, error)
 	ListBreakingReportOverviews(ctx context.Context, input uiquery.ListBreakingReportOverviewsInput) ([]uiquery.BreakingReportSummary, error)
 	GetBreakingReportDetails(ctx context.Context, input uiquery.GetBreakingReportDetailsInput) (uiquery.BreakingReportDetails, error)
+	ListRuntimeServices(ctx context.Context, input uiquery.ListRuntimeServicesInput) ([]uiquery.RuntimeServiceSummary, error)
+	GetRuntimeServiceDetails(ctx context.Context, input uiquery.GetRuntimeServiceDetailsInput) (uiquery.RuntimeServiceDetails, error)
+	GetRuntimeEnvironmentInventory(ctx context.Context, input uiquery.GetRuntimeEnvironmentInventoryInput) (uiquery.RuntimeEnvironmentInventory, error)
+	GetModuleRuntimeUsages(ctx context.Context, input uiquery.GetModuleRuntimeUsagesInput) (uiquery.ModuleRuntimeUsages, error)
 }
 
 type Server struct {
@@ -41,25 +45,30 @@ type Options struct {
 }
 
 type pageData struct {
-	Title          string
-	Active         string
-	BasePath       string
-	StaticPath     string
-	Status         string
-	Module         string
-	Version        string
-	ReportID       string
-	Message        string
-	EmptyTitle     string
-	EmptyBody      string
-	Query          string
-	Modules        []moduleRow
-	ModuleView     *moduleDetailView
-	DependencyView *moduleDependencyView
-	VersionView    *versionDetailView
-	ReportFilters  reportFilters
-	Reports        []reportRow
-	ReportView     *breakingReportDetailView
+	Title                  string
+	Active                 string
+	BasePath               string
+	StaticPath             string
+	Status                 string
+	Module                 string
+	Version                string
+	ReportID               string
+	Message                string
+	EmptyTitle             string
+	EmptyBody              string
+	Query                  string
+	Modules                []moduleRow
+	ModuleView             *moduleDetailView
+	DependencyView         *moduleDependencyView
+	VersionView            *versionDetailView
+	ReportFilters          reportFilters
+	Reports                []reportRow
+	ReportView             *breakingReportDetailView
+	RuntimeFilters         runtimeFilters
+	RuntimeServices        []runtimeServiceRow
+	RuntimeServiceView     *runtimeServiceDetailView
+	RuntimeEnvironmentView *runtimeEnvironmentView
+	ModuleRuntimeView      *moduleRuntimeUsagesView
 }
 
 type moduleRow struct {
@@ -98,6 +107,7 @@ type moduleDetailView struct {
 	RecentReports      []reportRow
 	FilteredReportsURL string
 	DependencyGraphURL string
+	RuntimeUsagesURL   string
 }
 
 type moduleDependencyView struct {
@@ -268,6 +278,13 @@ type reportFilters struct {
 	HasFilters bool
 }
 
+type runtimeFilters struct {
+	Query       string
+	Environment string
+	DriftStatus string
+	HasFilters  bool
+}
+
 type breakingReportDetailView struct {
 	ID                 string
 	Module             string
@@ -282,8 +299,10 @@ type breakingReportDetailView struct {
 	ReportsURL         string
 	Changes            []changeRow
 	AffectedModules    []dependencyModuleRow
+	RuntimeImpact      []runtimeImpactRow
 	HasChanges         bool
 	HasAffectedModules bool
+	HasRuntimeImpact   bool
 }
 
 type changeRow struct {
@@ -293,6 +312,91 @@ type changeRow struct {
 	RuleID      string
 	Message     string
 	Severity    string
+}
+
+type runtimeServiceRow struct {
+	ServiceName         string
+	Environments        string
+	LastReportedAt      string
+	UpToDateCount       int
+	BehindLatestCount   int
+	UnknownVersionCount int
+	DeprecatedCount     int
+	ServiceURL          string
+	EnvironmentURLs     []runtimeEnvironmentLink
+}
+
+type runtimeEnvironmentLink struct {
+	Name string
+	URL  string
+}
+
+type runtimeServiceDetailView struct {
+	ServiceName    string
+	ServicesURL    string
+	Deployments    []runtimeDeploymentView
+	HasDeployments bool
+}
+
+type runtimeDeploymentView struct {
+	ID             string
+	ServiceName    string
+	ServiceURL     string
+	Environment    string
+	EnvironmentURL string
+	GitCommit      string
+	BuildVersion   string
+	ReportedAt     string
+	Usages         []runtimeUsageRow
+	HasUsages      bool
+}
+
+type runtimeUsageRow struct {
+	Module        string
+	Version       string
+	LatestVersion string
+	DriftStatus   string
+	DriftReason   string
+	ModuleURL     string
+}
+
+type runtimeEnvironmentView struct {
+	Environment    string
+	ServicesURL    string
+	Deployments    []runtimeDeploymentView
+	HasDeployments bool
+}
+
+type moduleRuntimeUsagesView struct {
+	Module    string
+	ModuleURL string
+	Usages    []moduleRuntimeUsageRow
+	HasUsages bool
+}
+
+type moduleRuntimeUsageRow struct {
+	ServiceName    string
+	ServiceURL     string
+	Environment    string
+	EnvironmentURL string
+	Version        string
+	LatestVersion  string
+	DriftStatus    string
+	DriftReason    string
+	ReportedAt     string
+}
+
+type runtimeImpactRow struct {
+	ServiceName    string
+	ServiceURL     string
+	Environment    string
+	EnvironmentURL string
+	UsedVersion    string
+	BuildVersion   string
+	GitCommit      string
+	ReportedAt     string
+	ImpactStatus   string
+	Reason         string
 }
 
 func NewServer(options Options) (*Server, error) {
@@ -319,12 +423,140 @@ func (server *Server) Handler() http.Handler {
 	mux.HandleFunc("GET "+server.basePath+"/modules", server.modules)
 	mux.HandleFunc("GET "+server.basePath+"/modules/{module}", server.moduleDetail)
 	mux.HandleFunc("GET "+server.basePath+"/modules/{module}/dependencies", server.moduleDependencies)
+	mux.HandleFunc("GET "+server.basePath+"/modules/{module}/runtime-usages", server.moduleRuntimeUsages)
 	mux.HandleFunc("GET "+server.basePath+"/modules/{module}/versions/{version}", server.versionDetail)
+	mux.HandleFunc("GET "+server.basePath+"/runtime/services", server.runtimeServices)
+	mux.HandleFunc("GET "+server.basePath+"/runtime/services/{service}", server.runtimeServiceDetail)
+	mux.HandleFunc("GET "+server.basePath+"/runtime/environments/{environment}", server.runtimeEnvironment)
 	mux.HandleFunc("GET "+server.basePath+"/breaking-reports", server.breakingReports)
 	mux.HandleFunc("GET "+server.basePath+"/breaking-reports/{report_id}", server.breakingReportDetail)
 	mux.HandleFunc("GET "+server.staticPath+"/app.css", server.stylesheet)
 	mux.HandleFunc("GET "+server.basePath+"/{path...}", server.notFound)
 	return mux
+}
+
+func (server *Server) runtimeServices(w http.ResponseWriter, r *http.Request) {
+	if server.query == nil {
+		server.RenderError(w, http.StatusInternalServerError, "")
+		return
+	}
+	filters := runtimeFilters{
+		Query:       strings.TrimSpace(r.URL.Query().Get("q")),
+		Environment: strings.TrimSpace(r.URL.Query().Get("environment")),
+		DriftStatus: strings.TrimSpace(r.URL.Query().Get("drift_status")),
+	}
+	filters.HasFilters = filters.Query != "" || filters.Environment != "" || filters.DriftStatus != ""
+	summaries, err := server.query.ListRuntimeServices(r.Context(), uiquery.ListRuntimeServicesInput{
+		Query:       filters.Query,
+		Environment: filters.Environment,
+		DriftStatus: filters.DriftStatus,
+	})
+	if err != nil {
+		server.RenderError(w, http.StatusInternalServerError, "")
+		return
+	}
+	rows := make([]runtimeServiceRow, 0, len(summaries))
+	for _, summary := range summaries {
+		rows = append(rows, server.runtimeServiceRow(summary))
+	}
+	emptyTitle := "No runtime services have reported inventory yet."
+	emptyBody := "Report deployed contract versions with: protoradar runtime report --service <service> --environment <env> --module <module>@<version>"
+	if filters.HasFilters {
+		emptyTitle = "No runtime services match these filters."
+		emptyBody = "Try a different service, environment, or drift status."
+	}
+	server.render(w, http.StatusOK, "runtime_services.html", pageData{
+		Title:           "Runtime Services",
+		Active:          "runtime",
+		Status:          "unknown",
+		Message:         "Inspect services that reported deployed protobuf contract versions.",
+		EmptyTitle:      emptyTitle,
+		EmptyBody:       emptyBody,
+		RuntimeFilters:  filters,
+		RuntimeServices: rows,
+	})
+}
+
+func (server *Server) runtimeServiceDetail(w http.ResponseWriter, r *http.Request) {
+	if server.query == nil {
+		server.RenderError(w, http.StatusInternalServerError, "")
+		return
+	}
+	serviceName := strings.TrimSpace(r.PathValue("service"))
+	details, err := server.query.GetRuntimeServiceDetails(r.Context(), uiquery.GetRuntimeServiceDetailsInput{Service: serviceName})
+	if err != nil {
+		if errors.Is(err, domain.ErrNotFound) || errors.Is(err, domain.ErrInvalidRuntimeServiceName) {
+			server.RenderError(w, http.StatusNotFound, "Runtime service not found.")
+			return
+		}
+		server.RenderError(w, http.StatusInternalServerError, "")
+		return
+	}
+	view := server.runtimeServiceDetailView(details)
+	server.render(w, http.StatusOK, "runtime_service_detail.html", pageData{
+		Title:              "Runtime Service " + view.ServiceName,
+		Active:             "runtime",
+		Status:             "unknown",
+		Message:            "Inspect reported deployments and protobuf module usage for this runtime service.",
+		EmptyTitle:         "No runtime deployments recorded for this service.",
+		EmptyBody:          "Report inventory with: protoradar runtime report --service " + view.ServiceName + " --module <module>@<version>",
+		RuntimeServiceView: &view,
+	})
+}
+
+func (server *Server) runtimeEnvironment(w http.ResponseWriter, r *http.Request) {
+	if server.query == nil {
+		server.RenderError(w, http.StatusInternalServerError, "")
+		return
+	}
+	environment := strings.TrimSpace(r.PathValue("environment"))
+	inventory, err := server.query.GetRuntimeEnvironmentInventory(r.Context(), uiquery.GetRuntimeEnvironmentInventoryInput{Environment: environment})
+	if err != nil {
+		if errors.Is(err, domain.ErrInvalidRuntimeEnvironment) {
+			server.RenderError(w, http.StatusNotFound, "Runtime environment not found.")
+			return
+		}
+		server.RenderError(w, http.StatusInternalServerError, "")
+		return
+	}
+	view := server.runtimeEnvironmentView(inventory)
+	server.render(w, http.StatusOK, "runtime_environment.html", pageData{
+		Title:                  "Runtime Environment " + view.Environment,
+		Active:                 "runtime",
+		Status:                 "unknown",
+		Message:                "Inspect services currently reported in this runtime environment.",
+		EmptyTitle:             "No runtime services are currently known in this environment.",
+		EmptyBody:              "Runtime inventory appears after services report deployed module versions.",
+		RuntimeEnvironmentView: &view,
+	})
+}
+
+func (server *Server) moduleRuntimeUsages(w http.ResponseWriter, r *http.Request) {
+	if server.query == nil {
+		server.RenderError(w, http.StatusInternalServerError, "")
+		return
+	}
+	moduleName := strings.TrimSpace(r.PathValue("module"))
+	usages, err := server.query.GetModuleRuntimeUsages(r.Context(), uiquery.GetModuleRuntimeUsagesInput{Module: moduleName})
+	if err != nil {
+		if errors.Is(err, domain.ErrNotFound) || errors.Is(err, domain.ErrInvalidModuleName) {
+			server.RenderError(w, http.StatusNotFound, "Module not found.")
+			return
+		}
+		server.RenderError(w, http.StatusInternalServerError, "")
+		return
+	}
+	view := server.moduleRuntimeUsagesView(usages)
+	server.render(w, http.StatusOK, "module_runtime_usages.html", pageData{
+		Title:             "Runtime Usage " + view.Module,
+		Active:            "modules",
+		Module:            view.Module,
+		Status:            "unknown",
+		Message:           "Inspect runtime services that report using this module.",
+		EmptyTitle:        "No runtime services are currently known to use this module.",
+		EmptyBody:         "Runtime usage appears after deployed services report inventory.",
+		ModuleRuntimeView: &view,
+	})
 }
 
 func (server *Server) moduleDependencies(w http.ResponseWriter, r *http.Request) {
@@ -600,6 +832,7 @@ func (server *Server) moduleDetailView(overview uiquery.ModuleOverview) moduleDe
 		HasRepositoryURL:   strings.TrimSpace(overview.Module.RepositoryURL) != "",
 		FilteredReportsURL: server.basePath + "/breaking-reports?module=" + url.QueryEscape(overview.Module.Name),
 		DependencyGraphURL: server.basePath + "/modules/" + pathEscape(overview.Module.Name) + "/dependencies",
+		RuntimeUsagesURL:   server.basePath + "/modules/" + pathEscape(overview.Module.Name) + "/runtime-usages",
 	}
 	if overview.GitLabProject != nil {
 		view.HasGitLabProject = true
@@ -782,8 +1015,12 @@ func (server *Server) breakingReportDetailView(details uiquery.BreakingReportDet
 	for _, item := range details.AffectedModules {
 		view.AffectedModules = append(view.AffectedModules, server.dependencyModuleRow(item))
 	}
+	for _, item := range details.RuntimeImpact {
+		view.RuntimeImpact = append(view.RuntimeImpact, server.runtimeImpactRow(item))
+	}
 	view.HasChanges = len(view.Changes) > 0
 	view.HasAffectedModules = len(view.AffectedModules) > 0
+	view.HasRuntimeImpact = len(view.RuntimeImpact) > 0
 	return view
 }
 
@@ -819,6 +1056,119 @@ func (server *Server) dependencyModuleRow(item uiquery.DependencyModule) depende
 		DependencySources: strings.Join(item.DependencySources, ", "),
 		Reasons:           strings.Join(item.Reasons, ", "),
 		ModuleURL:         server.basePath + "/modules/" + pathEscape(item.Module),
+	}
+}
+
+func (server *Server) runtimeServiceRow(summary uiquery.RuntimeServiceSummary) runtimeServiceRow {
+	links := make([]runtimeEnvironmentLink, 0, len(summary.Environments))
+	for _, environment := range summary.Environments {
+		links = append(links, runtimeEnvironmentLink{
+			Name: environment,
+			URL:  server.basePath + "/runtime/environments/" + pathEscape(environment),
+		})
+	}
+	return runtimeServiceRow{
+		ServiceName:         summary.ServiceName,
+		Environments:        strings.Join(summary.Environments, ", "),
+		LastReportedAt:      formatTimePtr(summary.LastReportedAt),
+		UpToDateCount:       summary.UpToDateCount,
+		BehindLatestCount:   summary.BehindLatestCount,
+		UnknownVersionCount: summary.UnknownVersionCount,
+		DeprecatedCount:     summary.DeprecatedCount,
+		ServiceURL:          server.basePath + "/runtime/services/" + pathEscape(summary.ServiceName),
+		EnvironmentURLs:     links,
+	}
+}
+
+func (server *Server) runtimeServiceDetailView(details uiquery.RuntimeServiceDetails) runtimeServiceDetailView {
+	view := runtimeServiceDetailView{
+		ServiceName: details.ServiceName,
+		ServicesURL: server.basePath + "/runtime/services",
+		Deployments: server.runtimeDeploymentViews(details.Deployments, details.Usages),
+	}
+	view.HasDeployments = len(view.Deployments) > 0
+	return view
+}
+
+func (server *Server) runtimeEnvironmentView(inventory uiquery.RuntimeEnvironmentInventory) runtimeEnvironmentView {
+	view := runtimeEnvironmentView{
+		Environment: inventory.Environment,
+		ServicesURL: server.basePath + "/runtime/services?environment=" + url.QueryEscape(inventory.Environment),
+		Deployments: server.runtimeDeploymentViews(inventory.Deployments, inventory.Usages),
+	}
+	view.HasDeployments = len(view.Deployments) > 0
+	return view
+}
+
+func (server *Server) runtimeDeploymentViews(deployments []uiquery.RuntimeDeployment, usages []uiquery.RuntimeModuleUsage) []runtimeDeploymentView {
+	usagesByDeployment := map[string][]runtimeUsageRow{}
+	for _, usage := range usages {
+		usagesByDeployment[usage.DeploymentID] = append(usagesByDeployment[usage.DeploymentID], server.runtimeUsageRow(usage))
+	}
+	items := make([]runtimeDeploymentView, 0, len(deployments))
+	for _, deployment := range deployments {
+		usageRows := usagesByDeployment[deployment.ID]
+		items = append(items, runtimeDeploymentView{
+			ID:             deployment.ID,
+			ServiceName:    deployment.ServiceName,
+			ServiceURL:     server.basePath + "/runtime/services/" + pathEscape(deployment.ServiceName),
+			Environment:    deployment.Environment,
+			EnvironmentURL: server.basePath + "/runtime/environments/" + pathEscape(deployment.Environment),
+			GitCommit:      deployment.GitCommit,
+			BuildVersion:   deployment.BuildVersion,
+			ReportedAt:     formatTime(deployment.ReportedAt),
+			Usages:         usageRows,
+			HasUsages:      len(usageRows) > 0,
+		})
+	}
+	return items
+}
+
+func (server *Server) runtimeUsageRow(usage uiquery.RuntimeModuleUsage) runtimeUsageRow {
+	return runtimeUsageRow{
+		Module:        usage.Module,
+		Version:       usage.Version,
+		LatestVersion: usage.LatestVersion,
+		DriftStatus:   usage.DriftStatus,
+		DriftReason:   usage.DriftReason,
+		ModuleURL:     server.basePath + "/modules/" + pathEscape(usage.Module),
+	}
+}
+
+func (server *Server) moduleRuntimeUsagesView(usages uiquery.ModuleRuntimeUsages) moduleRuntimeUsagesView {
+	view := moduleRuntimeUsagesView{
+		Module:    usages.Module,
+		ModuleURL: server.basePath + "/modules/" + pathEscape(usages.Module),
+	}
+	for _, usage := range usages.Usages {
+		view.Usages = append(view.Usages, moduleRuntimeUsageRow{
+			ServiceName:    usage.ServiceName,
+			ServiceURL:     server.basePath + "/runtime/services/" + pathEscape(usage.ServiceName),
+			Environment:    usage.Environment,
+			EnvironmentURL: server.basePath + "/runtime/environments/" + pathEscape(usage.Environment),
+			Version:        usage.Version,
+			LatestVersion:  usage.LatestVersion,
+			DriftStatus:    usage.DriftStatus,
+			DriftReason:    usage.DriftReason,
+			ReportedAt:     formatTime(usage.ReportedAt),
+		})
+	}
+	view.HasUsages = len(view.Usages) > 0
+	return view
+}
+
+func (server *Server) runtimeImpactRow(impact uiquery.RuntimeImpact) runtimeImpactRow {
+	return runtimeImpactRow{
+		ServiceName:    impact.ServiceName,
+		ServiceURL:     server.basePath + "/runtime/services/" + pathEscape(impact.ServiceName),
+		Environment:    impact.Environment,
+		EnvironmentURL: server.basePath + "/runtime/environments/" + pathEscape(impact.Environment),
+		UsedVersion:    impact.UsedVersion,
+		BuildVersion:   impact.BuildVersion,
+		GitCommit:      impact.GitCommit,
+		ReportedAt:     formatTime(impact.ReportedAt),
+		ImpactStatus:   impact.ImpactStatus,
+		Reason:         impact.Reason,
 	}
 }
 
@@ -888,6 +1238,16 @@ func statusBadgeClass(status string) string {
 		return "badge badge-failed"
 	case "warning", "warn":
 		return "badge badge-warning"
+	case "up_to_date":
+		return "badge badge-up-to-date"
+	case "behind_latest":
+		return "badge badge-behind-latest"
+	case "unknown_version":
+		return "badge badge-unknown-version"
+	case "deprecated_version":
+		return "badge badge-deprecated-version"
+	case "potentially_affected_by_breaking_change":
+		return "badge badge-runtime-impact"
 	default:
 		return "badge badge-unknown"
 	}
@@ -930,6 +1290,13 @@ func formatTime(value time.Time) string {
 		return ""
 	}
 	return value.UTC().Format("2006-01-02 15:04 UTC")
+}
+
+func formatTimePtr(value *time.Time) string {
+	if value == nil {
+		return ""
+	}
+	return formatTime(*value)
 }
 
 func yesNo(value bool) string {

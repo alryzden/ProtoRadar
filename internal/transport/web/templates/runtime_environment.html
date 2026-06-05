@@ -1,0 +1,64 @@
+{{template "header" .}}
+{{with .RuntimeEnvironmentView}}
+<nav class="breadcrumb" aria-label="Breadcrumb">
+  <a href="{{.ServicesURL}}">Runtime Services</a>
+  <span>/</span>
+  <span>{{.Environment}}</span>
+</nav>
+<section class="hero compact">
+  <div>
+    <p class="eyebrow">Runtime Environment</p>
+    <h1>{{.Environment}}</h1>
+    <p>Inspect services and deployed protobuf contract versions reported in this environment.</p>
+  </div>
+  <span class="badge badge-unknown">inventory</span>
+</section>
+{{if .HasDeployments}}
+{{range .Deployments}}
+<section class="card">
+  <div class="section-heading">
+    <div>
+      <p class="eyebrow">Service</p>
+      <h2><a href="{{.ServiceURL}}">{{.ServiceName}}</a></h2>
+    </div>
+  </div>
+  <dl class="meta-list">
+    <div><dt>Git Commit</dt><dd>{{if .GitCommit}}<span class="code-inline">{{.GitCommit}}</span>{{else}}Unknown{{end}}</dd></div>
+    <div><dt>Build Version</dt><dd>{{if .BuildVersion}}<span class="code-inline">{{.BuildVersion}}</span>{{else}}Unknown{{end}}</dd></div>
+    <div><dt>Reported</dt><dd>{{if .ReportedAt}}{{.ReportedAt}}{{else}}Unknown{{end}}</dd></div>
+  </dl>
+  {{if .HasUsages}}
+  <div class="table-wrap embedded">
+    <table>
+      <thead>
+        <tr>
+          <th>Module</th>
+          <th>Version</th>
+          <th>Latest Version</th>
+          <th>Drift Status</th>
+          <th>Drift Reason</th>
+        </tr>
+      </thead>
+      <tbody>
+        {{range .Usages}}
+        <tr>
+          <td><a href="{{.ModuleURL}}">{{.Module}}</a></td>
+          <td><span class="code-inline">{{.Version}}</span></td>
+          <td>{{if .LatestVersion}}<span class="code-inline">{{.LatestVersion}}</span>{{else}}<span class="muted">Unknown</span>{{end}}</td>
+          <td><span class="{{badgeClass .DriftStatus}}">{{badgeText .DriftStatus}}</span></td>
+          <td>{{if .DriftReason}}{{.DriftReason}}{{else}}<span class="muted">None</span>{{end}}</td>
+        </tr>
+        {{end}}
+      </tbody>
+    </table>
+  </div>
+  {{else}}
+  <p class="muted">No module usages were stored for this deployment.</p>
+  {{end}}
+</section>
+{{end}}
+{{else}}
+{{template "empty_state" $}}
+{{end}}
+{{end}}
+{{template "footer" .}}

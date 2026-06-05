@@ -13,6 +13,9 @@ func TestDefaults(t *testing.T) {
 	if cfg.Server.HTTPAddr != ":8080" {
 		t.Fatalf("http addr = %q", cfg.Server.HTTPAddr)
 	}
+	if cfg.Server.MaxRequestBodyBytes != defaultMaxRequestBodyBytes {
+		t.Fatalf("max request body bytes = %d", cfg.Server.MaxRequestBodyBytes)
+	}
 	if cfg.Storage.S3.Region != "us-east-1" {
 		t.Fatalf("region = %q", cfg.Storage.S3.Region)
 	}
@@ -57,6 +60,12 @@ func TestDefaults(t *testing.T) {
 	}
 	if cfg.UI.StaticPath != "/ui/static" {
 		t.Fatalf("ui static path = %q", cfg.UI.StaticPath)
+	}
+	if cfg.Log.Level != LogLevelInfo {
+		t.Fatalf("log level = %q", cfg.Log.Level)
+	}
+	if cfg.Log.Format != LogFormatJSON {
+		t.Fatalf("log format = %q", cfg.Log.Format)
 	}
 }
 
@@ -182,9 +191,20 @@ func TestValidateFailuresAreDeterministic(t *testing.T) {
 	}
 }
 
+func TestServerValidationFailures(t *testing.T) {
+	cfg := validConfig()
+	cfg.Server.MaxRequestBodyBytes = 0
+
+	want := "server.max_request_body_bytes must be positive"
+	if err := cfg.Validate(); err == nil || err.Error() != want {
+		t.Fatalf("error = %v, want %q", err, want)
+	}
+}
+
 func TestRuntimeMapping(t *testing.T) {
 	cfg := Defaults()
 	cfg.Server.HTTPAddr = ":9090"
+	cfg.Server.MaxRequestBodyBytes = 12345
 	cfg.Database.URL = "postgres://postgres:postgres@localhost:5432/protoradar"
 	cfg.Storage.S3.Endpoint = "http://localhost:9000"
 	cfg.Storage.S3.Bucket = "protoradar"
@@ -207,6 +227,8 @@ func TestRuntimeMapping(t *testing.T) {
 	cfg.UI.Enabled = false
 	cfg.UI.BasePath = "/console/"
 	cfg.UI.StaticPath = "/console/assets/"
+	cfg.Log.Level = LogLevelDebug
+	cfg.Log.Format = LogFormatText
 
 	runtime, err := cfg.Runtime()
 	if err != nil {
@@ -215,6 +237,9 @@ func TestRuntimeMapping(t *testing.T) {
 
 	if runtime.Server.HTTPAddr != ":9090" {
 		t.Fatalf("http addr = %q", runtime.Server.HTTPAddr)
+	}
+	if runtime.Server.MaxRequestBodyBytes != 12345 {
+		t.Fatalf("max request body bytes = %d", runtime.Server.MaxRequestBodyBytes)
 	}
 	if runtime.Database.URL != cfg.Database.URL {
 		t.Fatalf("database url = %q", runtime.Database.URL)
@@ -273,6 +298,12 @@ func TestRuntimeMapping(t *testing.T) {
 	if runtime.UI.StaticPath != "/console/assets" {
 		t.Fatalf("ui static path = %q", runtime.UI.StaticPath)
 	}
+	if runtime.Log.Level != LogLevelDebug {
+		t.Fatalf("log level = %q", runtime.Log.Level)
+	}
+	if runtime.Log.Format != LogFormatText {
+		t.Fatalf("log format = %q", runtime.Log.Format)
+	}
 }
 
 func TestLoadFileAndEnvOverrides(t *testing.T) {
@@ -281,7 +312,9 @@ func TestLoadFileAndEnvOverrides(t *testing.T) {
 		t.Fatalf("temp file: %v", err)
 	}
 	_, err = file.WriteString(strings.TrimSpace(`
-storage:
+	server:
+	  max_request_body_bytes: 256
+	storage:
   s3:
     endpoint: http://localhost:9000
     region: local
@@ -308,6 +341,9 @@ ui:
   enabled: false
   base_path: /console
   static_path: /console/assets
+log:
+  level: warn
+  format: text
 database:
   url: postgres://postgres:postgres@localhost:5432/protoradar
 `))
@@ -319,6 +355,7 @@ database:
 	}
 
 	t.Setenv("PROTORADAR_STORAGE_S3_BUCKET", "env-bucket")
+	t.Setenv("PROTORADAR_MAX_REQUEST_BODY_BYTES", "512")
 	t.Setenv("PROTORADAR_REGISTRY_MAX_ARTIFACT_SIZE_BYTES", "256")
 	t.Setenv("PROTORADAR_BUF_BINARY_PATH", "/env/bin/buf")
 	t.Setenv("PROTORADAR_BUF_BUILD_TIMEOUT", "40s")
@@ -332,6 +369,8 @@ database:
 	t.Setenv("PROTORADAR_UI_ENABLED", "true")
 	t.Setenv("PROTORADAR_UI_BASE_PATH", "/ui")
 	t.Setenv("PROTORADAR_UI_STATIC_PATH", "/ui/static")
+	t.Setenv("PROTORADAR_LOG_LEVEL", "debug")
+	t.Setenv("PROTORADAR_LOG_FORMAT", "json")
 	t.Setenv("PROTORADAR_DATABASE_URL", "postgres://env")
 
 	cfg, err := LoadFile(file.Name())
@@ -341,6 +380,9 @@ database:
 
 	if cfg.Storage.S3.Bucket != "env-bucket" {
 		t.Fatalf("bucket = %q", cfg.Storage.S3.Bucket)
+	}
+	if cfg.Server.MaxRequestBodyBytes != 512 {
+		t.Fatalf("max request body bytes = %d", cfg.Server.MaxRequestBodyBytes)
 	}
 	if cfg.Registry.MaxArtifactSizeBytes != 256 {
 		t.Fatalf("max artifact size = %d", cfg.Registry.MaxArtifactSizeBytes)
@@ -384,8 +426,48 @@ database:
 	if cfg.UI.StaticPath != "/ui/static" {
 		t.Fatalf("ui static path = %q", cfg.UI.StaticPath)
 	}
+	if cfg.Log.Level != LogLevelDebug {
+		t.Fatalf("log level = %q", cfg.Log.Level)
+	}
+	if cfg.Log.Format != LogFormatJSON {
+		t.Fatalf("log format = %q", cfg.Log.Format)
+	}
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("validate: %v", err)
+	}
+}
+
+func TestLogValidationFailures(t *testing.T) {
+	tests := []struct {
+		name string
+		edit func(*Config)
+		want string
+	}{
+		{
+			name: "invalid level",
+			edit: func(cfg *Config) {
+				cfg.Log.Level = "trace"
+			},
+			want: "log.level must be one of debug, info, warn, error",
+		},
+		{
+			name: "invalid format",
+			edit: func(cfg *Config) {
+				cfg.Log.Format = "pretty"
+			},
+			want: "log.format must be one of json, text",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := validConfig()
+			tt.edit(&cfg)
+
+			if err := cfg.Validate(); err == nil || err.Error() != tt.want {
+				t.Fatalf("error = %v, want %q", err, tt.want)
+			}
+		})
 	}
 }
 

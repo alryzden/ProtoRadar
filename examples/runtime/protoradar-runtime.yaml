@@ -1,0 +1,9 @@
+service_name: billing-service
+environment: production
+git_commit: abc1234
+build_version: 2026.06.04-15
+modules:
+  - module: user-api
+    version: v1.2.0
+  - module: billing-api
+    version: v1.4.0

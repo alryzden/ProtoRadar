@@ -24,6 +24,7 @@ var (
 type Error struct {
 	StatusCode int
 	Status     string
+	Code       string
 	Body       string
 }
 
@@ -192,6 +193,54 @@ type AffectedModules struct {
 	AffectedModules []DependencyModule `json:"affected_modules"`
 }
 
+type RuntimeImpact struct {
+	ServiceName  string    `json:"service_name"`
+	Environment  string    `json:"environment"`
+	UsedModule   string    `json:"used_module"`
+	UsedVersion  string    `json:"used_version"`
+	GitCommit    string    `json:"git_commit"`
+	BuildVersion string    `json:"build_version"`
+	ReportedAt   time.Time `json:"reported_at"`
+	ImpactStatus string    `json:"impact_status"`
+	Reason       string    `json:"reason"`
+}
+
+type BreakingReportRuntimeImpact struct {
+	ReportID string          `json:"report_id"`
+	Impacts  []RuntimeImpact `json:"impacts"`
+}
+
+type ReportRuntimeInventoryRequest struct {
+	ServiceName  string                 `json:"service_name"`
+	Environment  string                 `json:"environment"`
+	GitCommit    string                 `json:"git_commit"`
+	BuildVersion string                 `json:"build_version"`
+	Modules      []RuntimeModuleRequest `json:"modules"`
+}
+
+type RuntimeModuleRequest struct {
+	Module  string `json:"module"`
+	Version string `json:"version"`
+}
+
+type RuntimeModuleUsage struct {
+	Module        string `json:"module"`
+	Version       string `json:"version"`
+	LatestVersion string `json:"latest_version"`
+	DriftStatus   string `json:"drift_status"`
+	DriftReason   string `json:"drift_reason"`
+}
+
+type ReportRuntimeInventoryResponse struct {
+	DeploymentID string               `json:"deployment_id"`
+	ServiceName  string               `json:"service_name"`
+	Environment  string               `json:"environment"`
+	GitCommit    string               `json:"git_commit"`
+	BuildVersion string               `json:"build_version"`
+	ReportedAt   time.Time            `json:"reported_at"`
+	Usages       []RuntimeModuleUsage `json:"usages"`
+}
+
 type ArtifactDownload struct {
 	Body           io.ReadCloser
 	ContentType    string
@@ -230,7 +279,7 @@ func (client *Client) CheckAuth(ctx context.Context) error {
 	defer res.Body.Close()
 
 	if res.StatusCode < 200 || res.StatusCode >= 300 {
-		return responseError(res)
+		return client.responseError(res)
 	}
 	return nil
 }
@@ -390,6 +439,38 @@ func (client *Client) GetAffectedModules(ctx context.Context, module string) (Af
 	return response, nil
 }
 
+func (client *Client) GetBreakingReportRuntimeImpact(ctx context.Context, reportID string) (BreakingReportRuntimeImpact, error) {
+	req, err := client.newRequest(ctx, http.MethodGet, "/api/v1/breaking-reports/"+reportID+"/runtime-impact", nil)
+	if err != nil {
+		return BreakingReportRuntimeImpact{}, err
+	}
+
+	var response BreakingReportRuntimeImpact
+	if err := client.doJSON(req, &response); err != nil {
+		return BreakingReportRuntimeImpact{}, err
+	}
+	return response, nil
+}
+
+func (client *Client) ReportRuntimeInventory(ctx context.Context, request ReportRuntimeInventoryRequest) (ReportRuntimeInventoryResponse, error) {
+	var body bytes.Buffer
+	if err := json.NewEncoder(&body).Encode(request); err != nil {
+		return ReportRuntimeInventoryResponse{}, err
+	}
+
+	req, err := client.newRequest(ctx, http.MethodPost, "/api/v1/runtime/reports", &body)
+	if err != nil {
+		return ReportRuntimeInventoryResponse{}, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	var response ReportRuntimeInventoryResponse
+	if err := client.doJSON(req, &response); err != nil {
+		return ReportRuntimeInventoryResponse{}, err
+	}
+	return response, nil
+}
+
 func (client *Client) DownloadArtifact(ctx context.Context, module string, version string) (ArtifactDownload, error) {
 	req, err := client.newRequest(ctx, http.MethodGet, "/api/v1/modules/"+module+"/versions/"+version+"/artifact", nil)
 	if err != nil {
@@ -402,7 +483,7 @@ func (client *Client) DownloadArtifact(ctx context.Context, module string, versi
 	}
 	if res.StatusCode < 200 || res.StatusCode >= 300 {
 		defer res.Body.Close()
-		return ArtifactDownload{}, responseError(res)
+		return ArtifactDownload{}, client.responseError(res)
 	}
 
 	return ArtifactDownload{
@@ -422,7 +503,7 @@ func (client *Client) doJSON(req *http.Request, dst any) error {
 	defer res.Body.Close()
 
 	if res.StatusCode < 200 || res.StatusCode >= 300 {
-		return responseError(res)
+		return client.responseError(res)
 	}
 	return json.NewDecoder(res.Body).Decode(dst)
 }
@@ -442,12 +523,42 @@ func (client *Client) newRequest(ctx context.Context, method string, path string
 	return req, nil
 }
 
-func responseError(res *http.Response) error {
+func (client *Client) responseError(res *http.Response) error {
 	body, _ := io.ReadAll(io.LimitReader(res.Body, 1024))
-	text := strings.TrimSpace(string(body))
+	code, text := parseErrorBody(body)
+	if client.token != "" {
+		text = strings.ReplaceAll(text, client.token, "[redacted]")
+	}
 	return Error{
 		StatusCode: res.StatusCode,
 		Status:     res.Status,
+		Code:       code,
 		Body:       text,
 	}
+}
+
+func parseErrorBody(body []byte) (string, string) {
+	text := strings.TrimSpace(string(body))
+	if text == "" {
+		return "", ""
+	}
+
+	var structured struct {
+		Error struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(body, &structured); err == nil && structured.Error.Message != "" {
+		return structured.Error.Code, structured.Error.Message
+	}
+
+	var legacy struct {
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(body, &legacy); err == nil && legacy.Error != "" {
+		return "", legacy.Error
+	}
+
+	return "", text
 }

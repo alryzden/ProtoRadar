@@ -34,6 +34,10 @@ type AffectedModulesClient interface {
 	ListAffectedModules(ctx context.Context, module string) ([]AffectedModule, error)
 }
 
+type RuntimeImpactClient interface {
+	ListRuntimeImpact(ctx context.Context, reportID string) ([]RuntimeImpact, error)
+}
+
 type GitLabClient interface {
 	ListMergeRequestNotes(ctx context.Context, projectID int64, mergeRequestIID int64) ([]gitlab.MergeRequestNote, error)
 	CreateMergeRequestNote(ctx context.Context, projectID int64, mergeRequestIID int64, body string) (gitlab.MergeRequestNote, error)
@@ -70,9 +74,19 @@ type AffectedModule struct {
 	Reasons           []string
 }
 
+type RuntimeImpact struct {
+	ServiceName  string
+	Environment  string
+	UsedModule   string
+	UsedVersion  string
+	BuildVersion string
+	GitCommit    string
+}
+
 type Runner struct {
 	BreakingClient        BreakingClient
 	AffectedModulesClient AffectedModulesClient
+	RuntimeImpactClient   RuntimeImpactClient
 	GitLabClient          GitLabClient
 }
 
@@ -121,8 +135,9 @@ func (runner Runner) Run(ctx context.Context, input Input) (Result, error) {
 	}
 
 	affected, _ := runner.fetchAffectedModules(ctx, input)
+	runtimeImpacts, runtimeImpactUnavailable := runner.fetchRuntimeImpact(ctx, report)
 
-	markdown := gitlabmr.RenderReport(renderReportFromBreaking(input, report, affected), gitlabmr.RenderOptions{MaxDisplayedChanges: input.MaxDisplayedChanges})
+	markdown := gitlabmr.RenderReport(renderReportFromBreaking(input, report, affected, runtimeImpacts, runtimeImpactUnavailable), gitlabmr.RenderOptions{MaxDisplayedChanges: input.MaxDisplayedChanges})
 	note, action, err := runner.upsertComment(ctx, input, markdown)
 	if err != nil {
 		if input.StatusEnabled {
@@ -240,7 +255,18 @@ func (runner Runner) fetchAffectedModules(ctx context.Context, input Input) ([]A
 	return runner.AffectedModulesClient.ListAffectedModules(ctx, strings.TrimSpace(input.Module))
 }
 
-func renderReportFromBreaking(input Input, report BreakingReport, affected []AffectedModule) gitlabmr.Report {
+func (runner Runner) fetchRuntimeImpact(ctx context.Context, report BreakingReport) ([]RuntimeImpact, bool) {
+	if runner.RuntimeImpactClient == nil || strings.TrimSpace(report.ID) == "" {
+		return []RuntimeImpact{}, false
+	}
+	impacts, err := runner.RuntimeImpactClient.ListRuntimeImpact(ctx, strings.TrimSpace(report.ID))
+	if err != nil {
+		return []RuntimeImpact{}, true
+	}
+	return impacts, false
+}
+
+func renderReportFromBreaking(input Input, report BreakingReport, affected []AffectedModule, runtimeImpacts []RuntimeImpact, runtimeImpactUnavailable bool) gitlabmr.Report {
 	module := report.Module
 	if strings.TrimSpace(module) == "" {
 		module = input.Module
@@ -271,17 +297,30 @@ func renderReportFromBreaking(input Input, report BreakingReport, affected []Aff
 			Reasons:           append([]string(nil), item.Reasons...),
 		})
 	}
+	renderedRuntimeImpacts := make([]gitlabmr.RuntimeImpact, 0, len(runtimeImpacts))
+	for _, item := range runtimeImpacts {
+		renderedRuntimeImpacts = append(renderedRuntimeImpacts, gitlabmr.RuntimeImpact{
+			ServiceName:  item.ServiceName,
+			Environment:  item.Environment,
+			UsedModule:   item.UsedModule,
+			UsedVersion:  item.UsedVersion,
+			BuildVersion: item.BuildVersion,
+			GitCommit:    item.GitCommit,
+		})
+	}
 	return gitlabmr.Report{
-		Module:          module,
-		Against:         against,
-		TargetRef:       targetRef,
-		Status:          report.Status,
-		ChangeCount:     report.ChangeCount,
-		Changes:         changes,
-		AffectedModules: affectedModules,
-		ReportID:        report.ID,
-		TargetURL:       input.StatusTargetURL,
-		CommitSHA:       input.CommitSHA,
+		Module:                   module,
+		Against:                  against,
+		TargetRef:                targetRef,
+		Status:                   report.Status,
+		ChangeCount:              report.ChangeCount,
+		Changes:                  changes,
+		AffectedModules:          affectedModules,
+		RuntimeImpacts:           renderedRuntimeImpacts,
+		RuntimeImpactUnavailable: runtimeImpactUnavailable,
+		ReportID:                 report.ID,
+		TargetURL:                input.StatusTargetURL,
+		CommitSHA:                input.CommitSHA,
 	}
 }
 

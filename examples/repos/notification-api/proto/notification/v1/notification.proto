@@ -1,0 +1,22 @@
+syntax = "proto3";
+
+package notification.v1;
+
+import "user/v1/user.proto";
+
+message NotificationPreference {
+  user.v1.User user = 1;
+  bool email_enabled = 2;
+}
+
+message SendWelcomeEmailRequest {
+  user.v1.User recipient = 1;
+}
+
+message SendWelcomeEmailResponse {
+  NotificationPreference preference = 1;
+}
+
+service NotificationService {
+  rpc SendWelcomeEmail(SendWelcomeEmailRequest) returns (SendWelcomeEmailResponse);
+}

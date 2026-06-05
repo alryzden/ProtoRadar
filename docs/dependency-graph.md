@@ -7,7 +7,7 @@ ProtoRadar can detect direct protobuf module dependencies during publish and sho
 - which upstream modules this module depends on;
 - which downstream modules currently depend on this module and may need coordination before a breaking change is merged.
 
-Phase 7 stores dependency records as part of the publish flow and exposes them through the CLI, REST API, Basic Web UI, and GitLab merge request comments.
+Community v1.0 stores dependency records as part of the publish flow and exposes them through the CLI, REST API, Basic Web UI, and GitLab merge request comments.
 
 ## How Dependencies Are Detected
 
@@ -45,7 +45,7 @@ Unresolved records are useful during onboarding because they show which imports 
 
 ## Direct vs Transitive Dependencies
 
-Phase 7 MVP supports direct downstream dependencies only. If `billing-api` depends on `user-api`, `billing-api` appears as affected when querying `user-api`.
+Community v1.0 MVP supports direct downstream dependencies only. If `billing-api` depends on `user-api`, `billing-api` appears as affected when querying `user-api`.
 
 ProtoRadar does not yet traverse transitive dependency chains. If `frontend-api` depends on `billing-api` and `billing-api` depends on `user-api`, querying affected modules for `user-api` returns `billing-api`, not `frontend-api`. Transitive traversal is planned for a later phase.
 
@@ -123,11 +123,11 @@ The renderer only displays affected-module data. It does not compute dependency 
 
 ## Example Scenario
 
-Example modules live under `examples/graph`:
+Example modules live under `examples/repos`:
 
-- `examples/graph/user-api`: defines reusable `user.v1` types;
-- `examples/graph/billing-api`: imports `user/v1/user.proto` and references `user.v1.User`;
-- `examples/graph/notification-api`: imports `user/v1/user.proto` and references `user.v1.User`.
+- `examples/repos/user-api`: defines reusable `user.v1` types;
+- `examples/repos/billing-api`: imports `user/v1/user.proto` and references `user.v1.User`;
+- `examples/repos/notification-api`: imports `user/v1/user.proto` and references `user.v1.User`.
 
 Create the modules:
 
@@ -147,15 +147,15 @@ Publish the provider first, then publish consumers:
 ```sh
 protoradar push user-api \
   --version v1.0.0 \
-  --path examples/graph/user-api
+  --path examples/repos/user-api
 
 protoradar push billing-api \
   --version v1.0.0 \
-  --path examples/graph/billing-api
+  --path examples/repos/billing-api
 
 protoradar push notification-api \
   --version v1.0.0 \
-  --path examples/graph/notification-api
+  --path examples/repos/notification-api
 ```
 
 Inspect dependencies for `user-api`:
@@ -181,21 +181,20 @@ Note: the consumer example `buf.yaml` files use a placeholder Buf dependency nam
 For local validation of the example proto files without a remote Buf dependency, the graph directory also includes a multi-module Buf config:
 
 ```sh
-buf lint examples/graph
-buf build examples/graph
+buf lint examples/repos
+buf build examples/repos
 ```
 
 ## Limitations
 
-Phase 7 intentionally keeps the graph MVP narrow:
+Community v1.0 intentionally keeps the graph MVP narrow:
 
 - direct dependencies only;
 - no transitive affected-module traversal yet;
-- no runtime usage detection yet;
+- runtime inventory is modeled separately in Community v1.0; dependency graph edges are still schema-level dependencies;
 - no generated client or SDK usage detection;
 - ambiguous providers are recorded as unresolved instead of guessed;
-- external dependencies are not fully modeled yet;
-- no runtime inventory was added in this phase.
+- external dependencies are not fully modeled yet.
 
 ## Architecture Notes
 

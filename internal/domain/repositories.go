@@ -55,6 +55,23 @@ type ModuleDependencyRepository interface {
 	ListUnresolvedByModuleVersion(ctx context.Context, moduleVersionID ModuleVersionID) ([]UnresolvedProtoDependency, error)
 }
 
+type RuntimeInventoryRepository interface {
+	UpsertRuntimeServiceByName(ctx context.Context, service RuntimeService) (RuntimeService, error)
+	GetRuntimeServiceByName(ctx context.Context, serviceName RuntimeServiceName) (RuntimeService, error)
+	CreateRuntimeDeployment(ctx context.Context, deployment RuntimeDeployment) error
+	CreateRuntimeModuleUsages(ctx context.Context, usages []RuntimeModuleUsage) error
+	ListRuntimeDeploymentsByService(ctx context.Context, serviceID RuntimeServiceID, limit int, offset int) ([]RuntimeDeployment, error)
+	ListRuntimeModuleUsagesByDeployment(ctx context.Context, deploymentID RuntimeDeploymentID) ([]RuntimeModuleUsage, error)
+	ListLatestRuntimeUsagesByServiceEnvironment(ctx context.Context, serviceName RuntimeServiceName, environment RuntimeEnvironment) ([]RuntimeModuleUsage, error)
+	ListRuntimeServices(ctx context.Context, limit int, offset int) ([]RuntimeServiceSummary, error)
+	GetRuntimeServiceDetails(ctx context.Context, serviceName RuntimeServiceName) (RuntimeServiceDetails, error)
+	ListRuntimeEnvironmentInventory(ctx context.Context, environment RuntimeEnvironment, limit int, offset int) (RuntimeEnvironmentInventory, error)
+	ListModuleRuntimeUsages(ctx context.Context, moduleID ModuleID, limit int, offset int) ([]ModuleRuntimeUsage, error)
+	ListModuleRuntimeUsagesByModuleName(ctx context.Context, moduleName ModuleName, limit int, offset int) ([]ModuleRuntimeUsage, error)
+	ListRuntimeModuleUsagesByDriftStatus(ctx context.Context, status RuntimeDriftStatus, limit int, offset int) ([]RuntimeModuleUsage, error)
+	ListRuntimeImpactByModuleVersion(ctx context.Context, reportID BreakingReportID, moduleVersionID ModuleVersionID, limit int, offset int) ([]RuntimeImpact, error)
+}
+
 type BufConfigRepository interface {
 	Save(ctx context.Context, moduleVersionID ModuleVersionID, config BufConfigInfo) error
 	GetByModuleVersion(ctx context.Context, moduleVersionID ModuleVersionID) (BufConfigInfo, error)

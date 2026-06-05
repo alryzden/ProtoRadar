@@ -26,7 +26,7 @@ func TestLayoutRendersNavigation(t *testing.T) {
 		t.Fatalf("status = %d, want %d", res.Code, http.StatusOK)
 	}
 	body := res.Body.String()
-	for _, want := range []string{"ProtoRadar", `href="/ui/modules"`, `href="/ui/breaking-reports"`, "Modules", "Breaking Reports"} {
+	for _, want := range []string{"ProtoRadar", `href="/ui/modules"`, `href="/ui/runtime/services"`, `href="/ui/breaking-reports"`, "Modules", "Runtime", "Breaking Reports"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("body missing %q: %s", want, body)
 		}
@@ -171,6 +171,19 @@ func TestModuleDetailsLinksToDependencyPage(t *testing.T) {
 	body := res.Body.String()
 	if !strings.Contains(body, "Dependency Graph") || !strings.Contains(body, `href="/ui/modules/user-api/dependencies"`) {
 		t.Fatalf("body missing dependency graph link: %s", body)
+	}
+}
+
+func TestModuleDetailsLinksToRuntimeUsagesPage(t *testing.T) {
+	handler := newTestHandler(t, newFakeQuery())
+	res := request(t, handler, "/ui/modules/user-api")
+
+	if res.Code != http.StatusOK {
+		t.Fatalf("status = %d", res.Code)
+	}
+	body := res.Body.String()
+	if !strings.Contains(body, "Runtime Usage") || !strings.Contains(body, `href="/ui/modules/user-api/runtime-usages"`) {
+		t.Fatalf("body missing runtime usage link: %s", body)
 	}
 }
 
@@ -616,6 +629,219 @@ func TestBreakingReportDetailsAffectedModulesEmptyState(t *testing.T) {
 	}
 }
 
+func TestRuntimeServicesPageRendersServices(t *testing.T) {
+	handler := newTestHandler(t, newFakeQuery())
+	res := request(t, handler, "/ui/runtime/services")
+
+	if res.Code != http.StatusOK {
+		t.Fatalf("status = %d", res.Code)
+	}
+	body := res.Body.String()
+	for _, want := range []string{"Runtime Services", "billing-service", "production", "2026-06-04", "behind_latest", `href="/ui/runtime/services/billing-service"`, `href="/ui/runtime/environments/production"`} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("body missing %q: %s", want, body)
+		}
+	}
+}
+
+func TestRuntimeServicesPageAppliesFilters(t *testing.T) {
+	query := newFakeQuery()
+	handler := newTestHandler(t, query)
+	res := request(t, handler, "/ui/runtime/services?q=billing&environment=production&drift_status=behind_latest")
+
+	if res.Code != http.StatusOK {
+		t.Fatalf("status = %d", res.Code)
+	}
+	if query.lastRuntimeListInput.Query != "billing" || query.lastRuntimeListInput.Environment != "production" || query.lastRuntimeListInput.DriftStatus != "behind_latest" {
+		t.Fatalf("filters = %#v", query.lastRuntimeListInput)
+	}
+}
+
+func TestRuntimeServicesPageEmptyState(t *testing.T) {
+	query := newFakeQuery()
+	query.runtimeServices = nil
+	handler := newTestHandler(t, query)
+	res := request(t, handler, "/ui/runtime/services")
+
+	if res.Code != http.StatusOK {
+		t.Fatalf("status = %d", res.Code)
+	}
+	if !strings.Contains(res.Body.String(), "No runtime services have reported inventory yet.") {
+		t.Fatalf("body missing empty state: %s", res.Body.String())
+	}
+}
+
+func TestRuntimeServiceDetailsPageRendersDeploymentsAndUsages(t *testing.T) {
+	handler := newTestHandler(t, newFakeQuery())
+	res := request(t, handler, "/ui/runtime/services/billing-service")
+
+	if res.Code != http.StatusOK {
+		t.Fatalf("status = %d", res.Code)
+	}
+	body := res.Body.String()
+	for _, want := range []string{"Runtime Service", "billing-service", "production", "abc1234", "2026.06.04-15", "user-api", "v1.2.0", "v2.0.0", "behind_latest", `href="/ui/modules/user-api"`} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("body missing %q: %s", want, body)
+		}
+	}
+}
+
+func TestEnvironmentPageRendersServicesAndUsages(t *testing.T) {
+	handler := newTestHandler(t, newFakeQuery())
+	res := request(t, handler, "/ui/runtime/environments/production")
+
+	if res.Code != http.StatusOK {
+		t.Fatalf("status = %d", res.Code)
+	}
+	body := res.Body.String()
+	for _, want := range []string{"Runtime Environment", "production", "billing-service", "abc1234", "user-api", "behind_latest", `href="/ui/runtime/services/billing-service"`} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("body missing %q: %s", want, body)
+		}
+	}
+}
+
+func TestMissingEnvironmentRendersUsefulEmptyPage(t *testing.T) {
+	handler := newTestHandler(t, newFakeQuery())
+	res := request(t, handler, "/ui/runtime/environments/staging")
+
+	if res.Code != http.StatusOK {
+		t.Fatalf("status = %d", res.Code)
+	}
+	if !strings.Contains(res.Body.String(), "No runtime services are currently known in this environment.") {
+		t.Fatalf("body missing empty state: %s", res.Body.String())
+	}
+}
+
+func TestModuleRuntimeUsagesPageRendersUsages(t *testing.T) {
+	handler := newTestHandler(t, newFakeQuery())
+	res := request(t, handler, "/ui/modules/user-api/runtime-usages")
+
+	if res.Code != http.StatusOK {
+		t.Fatalf("status = %d", res.Code)
+	}
+	body := res.Body.String()
+	for _, want := range []string{"Module Runtime Usage", "user-api", "billing-service", "production", "v1.2.0", "v2.0.0", "behind_latest", `href="/ui/runtime/services/billing-service"`} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("body missing %q: %s", want, body)
+		}
+	}
+}
+
+func TestModuleRuntimeUsagesEmptyState(t *testing.T) {
+	query := newFakeQuery()
+	query.moduleRuntimeUsages["user-api"] = uiquery.ModuleRuntimeUsages{Module: "user-api"}
+	handler := newTestHandler(t, query)
+	res := request(t, handler, "/ui/modules/user-api/runtime-usages")
+
+	if res.Code != http.StatusOK {
+		t.Fatalf("status = %d", res.Code)
+	}
+	if !strings.Contains(res.Body.String(), "No runtime services are currently known to use this module.") {
+		t.Fatalf("body missing empty state: %s", res.Body.String())
+	}
+}
+
+func TestMissingModuleRuntimeUsagesReturnsNotFound(t *testing.T) {
+	handler := newTestHandler(t, newFakeQuery())
+	res := request(t, handler, "/ui/modules/missing/runtime-usages")
+
+	if res.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want %d", res.Code, http.StatusNotFound)
+	}
+	if !strings.Contains(res.Body.String(), "Module not found") {
+		t.Fatalf("body = %s", res.Body.String())
+	}
+}
+
+func TestBreakingReportDetailsRendersRuntimeImpactSection(t *testing.T) {
+	handler := newTestHandler(t, newFakeQuery())
+	res := request(t, handler, "/ui/breaking-reports/report-2")
+
+	if res.Code != http.StatusOK {
+		t.Fatalf("status = %d", res.Code)
+	}
+	body := res.Body.String()
+	for _, want := range []string{"Runtime Impact", "billing-service", "production", "v2.0.0", "2026.06.04-15", "abc1234", "potentially_affected_by_breaking_change", "service uses base module version"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("body missing %q: %s", want, body)
+		}
+	}
+}
+
+func TestBreakingReportDetailsRuntimeImpactEmptyState(t *testing.T) {
+	query := newFakeQuery()
+	details := query.reportDetails["report-2"]
+	details.RuntimeImpact = nil
+	query.reportDetails["report-2"] = details
+	handler := newTestHandler(t, query)
+	res := request(t, handler, "/ui/breaking-reports/report-2")
+
+	if res.Code != http.StatusOK {
+		t.Fatalf("status = %d", res.Code)
+	}
+	if !strings.Contains(res.Body.String(), "No runtime services are currently known to use the affected module version.") {
+		t.Fatalf("body missing runtime impact empty state: %s", res.Body.String())
+	}
+}
+
+func TestRuntimeStatusBadgesRenderClasses(t *testing.T) {
+	tests := []struct {
+		status string
+		want   string
+	}{
+		{status: "up_to_date", want: "badge badge-up-to-date"},
+		{status: "behind_latest", want: "badge badge-behind-latest"},
+		{status: "unknown_version", want: "badge badge-unknown-version"},
+		{status: "deprecated_version", want: "badge badge-deprecated-version"},
+		{status: "potentially_affected_by_breaking_change", want: "badge badge-runtime-impact"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.status, func(t *testing.T) {
+			if got := statusBadgeClass(tt.status); got != tt.want {
+				t.Fatalf("class = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestRuntimeValuesAreHTMLEscaped(t *testing.T) {
+	query := newFakeQuery()
+	details := query.runtimeDetails["billing-service"]
+	details.ServiceName = `<b>service</b>`
+	details.Deployments[0].ServiceName = `<b>service</b>`
+	details.Deployments[0].Environment = `<i>prod</i>`
+	details.Deployments[0].BuildVersion = `<b>build</b>`
+	details.Usages[0].DriftReason = `<script>alert(1)</script>`
+	query.runtimeDetails["billing-service"] = details
+	handler := newTestHandler(t, query)
+	res := request(t, handler, "/ui/runtime/services/billing-service")
+
+	if res.Code != http.StatusOK {
+		t.Fatalf("status = %d", res.Code)
+	}
+	body := res.Body.String()
+	if strings.Contains(body, `<b>service</b>`) || strings.Contains(body, `<i>prod</i>`) || strings.Contains(body, `<b>build</b>`) || strings.Contains(body, `<script>`) {
+		t.Fatalf("body rendered raw runtime HTML: %s", body)
+	}
+	if !strings.Contains(body, `&lt;b&gt;service&lt;/b&gt;`) || !strings.Contains(body, `&lt;i&gt;prod&lt;/i&gt;`) || !strings.Contains(body, `&lt;b&gt;build&lt;/b&gt;`) || !strings.Contains(body, `&lt;script&gt;alert(1)&lt;/script&gt;`) {
+		t.Fatalf("body missing escaped runtime values: %s", body)
+	}
+}
+
+func TestMissingRuntimeServiceReturnsNotFound(t *testing.T) {
+	handler := newTestHandler(t, newFakeQuery())
+	res := request(t, handler, "/ui/runtime/services/missing-service")
+
+	if res.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want %d", res.Code, http.StatusNotFound)
+	}
+	if !strings.Contains(res.Body.String(), "Runtime service not found") {
+		t.Fatalf("body = %s", res.Body.String())
+	}
+}
+
 func TestMissingModuleReturnsNotFound(t *testing.T) {
 	handler := newTestHandler(t, newFakeQuery())
 	res := request(t, handler, "/ui/modules/missing")
@@ -766,13 +992,18 @@ func TestErrorPageDoesNotExposeStackTrace(t *testing.T) {
 }
 
 type fakeQuery struct {
-	modules             []uiquery.ModuleOverview
-	version             uiquery.VersionOverview
-	reports             []uiquery.BreakingReportSummary
-	reportDetails       map[string]uiquery.BreakingReportDetails
-	dependencyGraphs    map[string]uiquery.ModuleDependencyGraph
-	lastListInput       uiquery.ListModuleOverviewsInput
-	lastReportListInput uiquery.ListBreakingReportOverviewsInput
+	modules              []uiquery.ModuleOverview
+	version              uiquery.VersionOverview
+	reports              []uiquery.BreakingReportSummary
+	reportDetails        map[string]uiquery.BreakingReportDetails
+	dependencyGraphs     map[string]uiquery.ModuleDependencyGraph
+	runtimeServices      []uiquery.RuntimeServiceSummary
+	runtimeDetails       map[string]uiquery.RuntimeServiceDetails
+	runtimeEnvironments  map[string]uiquery.RuntimeEnvironmentInventory
+	moduleRuntimeUsages  map[string]uiquery.ModuleRuntimeUsages
+	lastListInput        uiquery.ListModuleOverviewsInput
+	lastReportListInput  uiquery.ListBreakingReportOverviewsInput
+	lastRuntimeListInput uiquery.ListRuntimeServicesInput
 }
 
 func newFakeQuery() *fakeQuery {
@@ -783,6 +1014,18 @@ func newFakeQuery() *fakeQuery {
 		reportDetails: map[string]uiquery.BreakingReportDetails{"report-2": userBreakingReportDetails()},
 		dependencyGraphs: map[string]uiquery.ModuleDependencyGraph{
 			"user-api": userDependencyGraph(),
+		},
+		runtimeServices: []uiquery.RuntimeServiceSummary{
+			billingRuntimeSummary(),
+		},
+		runtimeDetails: map[string]uiquery.RuntimeServiceDetails{
+			"billing-service": billingRuntimeDetails(),
+		},
+		runtimeEnvironments: map[string]uiquery.RuntimeEnvironmentInventory{
+			"production": productionRuntimeInventory(),
+		},
+		moduleRuntimeUsages: map[string]uiquery.ModuleRuntimeUsages{
+			"user-api": userAPIRuntimeUsages(),
 		},
 	}
 }
@@ -856,6 +1099,54 @@ func (query *fakeQuery) GetBreakingReportDetails(ctx context.Context, input uiqu
 		return uiquery.BreakingReportDetails{}, domain.ErrNotFound
 	}
 	return details, nil
+}
+
+func (query *fakeQuery) ListRuntimeServices(ctx context.Context, input uiquery.ListRuntimeServicesInput) ([]uiquery.RuntimeServiceSummary, error) {
+	query.lastRuntimeListInput = input
+	items := make([]uiquery.RuntimeServiceSummary, 0, len(query.runtimeServices))
+	for _, summary := range query.runtimeServices {
+		if input.Query != "" && !strings.Contains(strings.ToLower(summary.ServiceName), strings.ToLower(input.Query)) {
+			continue
+		}
+		if input.Environment != "" {
+			found := false
+			for _, environment := range summary.Environments {
+				if environment == input.Environment {
+					found = true
+					break
+				}
+			}
+			if !found {
+				continue
+			}
+		}
+		items = append(items, summary)
+	}
+	return items, nil
+}
+
+func (query *fakeQuery) GetRuntimeServiceDetails(ctx context.Context, input uiquery.GetRuntimeServiceDetailsInput) (uiquery.RuntimeServiceDetails, error) {
+	details, ok := query.runtimeDetails[input.Service]
+	if !ok {
+		return uiquery.RuntimeServiceDetails{}, domain.ErrNotFound
+	}
+	return details, nil
+}
+
+func (query *fakeQuery) GetRuntimeEnvironmentInventory(ctx context.Context, input uiquery.GetRuntimeEnvironmentInventoryInput) (uiquery.RuntimeEnvironmentInventory, error) {
+	inventory, ok := query.runtimeEnvironments[input.Environment]
+	if !ok {
+		return uiquery.RuntimeEnvironmentInventory{Environment: input.Environment}, nil
+	}
+	return inventory, nil
+}
+
+func (query *fakeQuery) GetModuleRuntimeUsages(ctx context.Context, input uiquery.GetModuleRuntimeUsagesInput) (uiquery.ModuleRuntimeUsages, error) {
+	usages, ok := query.moduleRuntimeUsages[input.Module]
+	if !ok {
+		return uiquery.ModuleRuntimeUsages{}, domain.ErrNotFound
+	}
+	return usages, nil
 }
 
 func userModule() uiquery.ModuleOverview {
@@ -1038,6 +1329,17 @@ func userBreakingReportDetails() uiquery.BreakingReportDetails {
 			DependencySources: []string{"import"},
 			Reasons:           []string{"import_path"},
 		}},
+		RuntimeImpact: []uiquery.RuntimeImpact{{
+			ServiceName:  "billing-service",
+			Environment:  "production",
+			UsedModule:   "user-api",
+			UsedVersion:  "v2.0.0",
+			GitCommit:    "abc1234",
+			BuildVersion: "2026.06.04-15",
+			ReportedAt:   testTime(9),
+			ImpactStatus: "potentially_affected_by_breaking_change",
+			Reason:       "service uses base module version",
+		}},
 	}
 }
 
@@ -1061,6 +1363,76 @@ func userDependencyGraph() uiquery.ModuleDependencyGraph {
 			ImportPath:       "missing/v1/missing.proto",
 			ReferencedSymbol: "missing.v1.Missing",
 			Reason:           "provider_not_found",
+		}},
+	}
+}
+
+func billingRuntimeSummary() uiquery.RuntimeServiceSummary {
+	reportedAt := testTime(9)
+	return uiquery.RuntimeServiceSummary{
+		ServiceName:         "billing-service",
+		Environments:        []string{"production"},
+		LastReportedAt:      &reportedAt,
+		UpToDateCount:       1,
+		BehindLatestCount:   1,
+		UnknownVersionCount: 1,
+		DeprecatedCount:     0,
+	}
+}
+
+func billingRuntimeDetails() uiquery.RuntimeServiceDetails {
+	return uiquery.RuntimeServiceDetails{
+		ServiceName: "billing-service",
+		Deployments: []uiquery.RuntimeDeployment{{
+			ID:           "deployment-1",
+			ServiceName:  "billing-service",
+			Environment:  "production",
+			GitCommit:    "abc1234",
+			BuildVersion: "2026.06.04-15",
+			ReportedAt:   testTime(9),
+			CreatedAt:    testTime(9),
+		}},
+		Usages: []uiquery.RuntimeModuleUsage{{
+			DeploymentID:  "deployment-1",
+			Module:        "user-api",
+			Version:       "v1.2.0",
+			LatestVersion: "v2.0.0",
+			DriftStatus:   "behind_latest",
+			DriftReason:   "latest version is v2.0.0",
+		}, {
+			DeploymentID:  "deployment-1",
+			Module:        "billing-api",
+			Version:       "v1.0.0",
+			LatestVersion: "v1.0.0",
+			DriftStatus:   "up_to_date",
+			DriftReason:   "up_to_date",
+		}},
+	}
+}
+
+func productionRuntimeInventory() uiquery.RuntimeEnvironmentInventory {
+	details := billingRuntimeDetails()
+	return uiquery.RuntimeEnvironmentInventory{
+		Environment: "production",
+		Deployments: details.Deployments,
+		Usages:      details.Usages,
+	}
+}
+
+func userAPIRuntimeUsages() uiquery.ModuleRuntimeUsages {
+	return uiquery.ModuleRuntimeUsages{
+		Module: "user-api",
+		Usages: []uiquery.ModuleRuntimeUsage{{
+			ServiceName:   "billing-service",
+			Environment:   "production",
+			Module:        "user-api",
+			Version:       "v1.2.0",
+			LatestVersion: "v2.0.0",
+			GitCommit:     "abc1234",
+			BuildVersion:  "2026.06.04-15",
+			ReportedAt:    testTime(9),
+			DriftStatus:   "behind_latest",
+			DriftReason:   "latest version is v2.0.0",
 		}},
 	}
 }

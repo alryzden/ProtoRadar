@@ -88,6 +88,30 @@ func (RandomIDGenerator) NewUnresolvedProtoDependencyID() (domain.UnresolvedProt
 	return domain.NewUnresolvedProtoDependencyID(value), nil
 }
 
+func (RandomIDGenerator) NewRuntimeServiceID() (domain.RuntimeServiceID, error) {
+	value, err := randomHex(16)
+	if err != nil {
+		return "", err
+	}
+	return domain.NewRuntimeServiceID(value), nil
+}
+
+func (RandomIDGenerator) NewRuntimeDeploymentID() (domain.RuntimeDeploymentID, error) {
+	value, err := randomHex(16)
+	if err != nil {
+		return "", err
+	}
+	return domain.NewRuntimeDeploymentID(value), nil
+}
+
+func (RandomIDGenerator) NewRuntimeModuleUsageID() (domain.RuntimeModuleUsageID, error) {
+	value, err := randomHex(16)
+	if err != nil {
+		return "", err
+	}
+	return domain.NewRuntimeModuleUsageID(value), nil
+}
+
 type RandomTokenGenerator struct{}
 
 func (RandomTokenGenerator) NewToken() (string, error) {

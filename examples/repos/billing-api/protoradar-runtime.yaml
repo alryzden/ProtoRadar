@@ -1,0 +1,9 @@
+service_name: billing-service
+environment: production
+git_commit: demo-billing-commit
+build_version: demo-v1
+modules:
+  - module: user-api
+    version: v1.0.0
+  - module: billing-api
+    version: v1.0.0

@@ -9,6 +9,7 @@ import (
 )
 
 const defaultMaxArtifactSizeBytes int64 = 100 * 1024 * 1024
+const defaultMaxRequestBodyBytes int64 = 110 * 1024 * 1024
 const defaultBufMaxReportBytes = 16 * 1024
 const defaultBreakingMaxReportBytes = 32 * 1024
 const defaultBreakingMaxChanges = 1000
@@ -17,6 +18,18 @@ const (
 	BufLintModeDisabled = "disabled"
 	BufLintModeWarn     = "warn"
 	BufLintModeEnforce  = "enforce"
+)
+
+const (
+	LogLevelDebug = "debug"
+	LogLevelInfo  = "info"
+	LogLevelWarn  = "warn"
+	LogLevelError = "error"
+)
+
+const (
+	LogFormatJSON = "json"
+	LogFormatText = "text"
 )
 
 type Config struct {
@@ -28,10 +41,12 @@ type Config struct {
 	Buf      BufConfig      `yaml:"buf"`
 	Breaking BreakingConfig `yaml:"breaking"`
 	UI       UIConfig       `yaml:"ui"`
+	Log      LogConfig      `yaml:"log"`
 }
 
 type ServerConfig struct {
-	HTTPAddr string `yaml:"http_addr"`
+	HTTPAddr            string `yaml:"http_addr"`
+	MaxRequestBodyBytes int64  `yaml:"max_request_body_bytes"`
 }
 
 type DatabaseConfig struct {
@@ -81,10 +96,16 @@ type UIConfig struct {
 	StaticPath string `yaml:"static_path"`
 }
 
+type LogConfig struct {
+	Level  string `yaml:"level"`
+	Format string `yaml:"format"`
+}
+
 func Defaults() Config {
 	return Config{
 		Server: ServerConfig{
-			HTTPAddr: ":8080",
+			HTTPAddr:            ":8080",
+			MaxRequestBodyBytes: defaultMaxRequestBodyBytes,
 		},
 		Storage: StorageConfig{
 			S3: S3Config{
@@ -112,6 +133,10 @@ func Defaults() Config {
 			Enabled:    true,
 			BasePath:   "/ui",
 			StaticPath: "/ui/static",
+		},
+		Log: LogConfig{
+			Level:  LogLevelInfo,
+			Format: LogFormatJSON,
 		},
 	}
 }
@@ -186,6 +211,12 @@ func applyYAMLValue(cfg *Config, path string, value string) error {
 	switch path {
 	case "server.http_addr":
 		cfg.Server.HTTPAddr = value
+	case "server.max_request_body_bytes":
+		parsed, err := strconv.ParseInt(value, 10, 64)
+		if err != nil {
+			return fmt.Errorf("server.max_request_body_bytes must be an integer")
+		}
+		cfg.Server.MaxRequestBodyBytes = parsed
 	case "database.url":
 		cfg.Database.URL = value
 	case "storage.s3.endpoint":
@@ -258,6 +289,10 @@ func applyYAMLValue(cfg *Config, path string, value string) error {
 		cfg.UI.BasePath = value
 	case "ui.static_path":
 		cfg.UI.StaticPath = value
+	case "log.level":
+		cfg.Log.Level = value
+	case "log.format":
+		cfg.Log.Format = value
 	default:
 		return fmt.Errorf("%s is not a supported config field", path)
 	}
@@ -267,6 +302,13 @@ func applyYAMLValue(cfg *Config, path string, value string) error {
 func (c *Config) ApplyEnv() error {
 	if value, ok := os.LookupEnv("PROTORADAR_HTTP_ADDR"); ok {
 		c.Server.HTTPAddr = value
+	}
+	if value, ok := os.LookupEnv("PROTORADAR_MAX_REQUEST_BODY_BYTES"); ok {
+		parsed, err := strconv.ParseInt(value, 10, 64)
+		if err != nil {
+			return fmt.Errorf("server.max_request_body_bytes must be an integer")
+		}
+		c.Server.MaxRequestBodyBytes = parsed
 	}
 	if value, ok := os.LookupEnv("PROTORADAR_DATABASE_URL"); ok {
 		c.Database.URL = value
@@ -362,6 +404,12 @@ func (c *Config) ApplyEnv() error {
 	if value, ok := os.LookupEnv("PROTORADAR_UI_STATIC_PATH"); ok {
 		c.UI.StaticPath = value
 	}
+	if value, ok := os.LookupEnv("PROTORADAR_LOG_LEVEL"); ok {
+		c.Log.Level = value
+	}
+	if value, ok := os.LookupEnv("PROTORADAR_LOG_FORMAT"); ok {
+		c.Log.Format = value
+	}
 	return nil
 }
 
@@ -387,6 +435,9 @@ func (c Config) Validate() error {
 	if err := c.validateUI(); err != nil {
 		return err
 	}
+	if err := c.validateLog(); err != nil {
+		return err
+	}
 	if err := c.validateDatabase(); err != nil {
 		return err
 	}
@@ -396,6 +447,9 @@ func (c Config) Validate() error {
 func (c Config) validateServer() error {
 	if strings.TrimSpace(c.Server.HTTPAddr) == "" {
 		return fmt.Errorf("server.http_addr is required")
+	}
+	if c.Server.MaxRequestBodyBytes <= 0 {
+		return fmt.Errorf("server.max_request_body_bytes must be positive")
 	}
 	return nil
 }
@@ -493,6 +547,20 @@ func (c Config) validateUI() error {
 	return nil
 }
 
+func (c Config) validateLog() error {
+	switch strings.TrimSpace(c.Log.Level) {
+	case LogLevelDebug, LogLevelInfo, LogLevelWarn, LogLevelError:
+	default:
+		return fmt.Errorf("log.level must be one of debug, info, warn, error")
+	}
+	switch strings.TrimSpace(c.Log.Format) {
+	case LogFormatJSON, LogFormatText:
+	default:
+		return fmt.Errorf("log.format must be one of json, text")
+	}
+	return nil
+}
+
 func (c Config) Runtime() (RuntimeConfig, error) {
 	if err := c.Validate(); err != nil {
 		return RuntimeConfig{}, err
@@ -509,7 +577,8 @@ func (c Config) Runtime() (RuntimeConfig, error) {
 
 	return RuntimeConfig{
 		Server: RuntimeServerConfig{
-			HTTPAddr: c.Server.HTTPAddr,
+			HTTPAddr:            c.Server.HTTPAddr,
+			MaxRequestBodyBytes: c.Server.MaxRequestBodyBytes,
 		},
 		Database: RuntimeDatabaseConfig{
 			URL: c.Database.URL,
@@ -548,6 +617,10 @@ func (c Config) Runtime() (RuntimeConfig, error) {
 			Enabled:    c.UI.Enabled,
 			BasePath:   normalizePath(c.UI.BasePath),
 			StaticPath: normalizePath(c.UI.StaticPath),
+		},
+		Log: RuntimeLogConfig{
+			Level:  strings.TrimSpace(c.Log.Level),
+			Format: strings.TrimSpace(c.Log.Format),
 		},
 	}, nil
 }

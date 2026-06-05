@@ -1,0 +1,10 @@
+.git
+.idea
+.vscode
+.env
+bin
+coverage.*
+*.coverprofile
+*.out
+*.test
+tmp

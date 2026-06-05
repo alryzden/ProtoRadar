@@ -14,6 +14,7 @@ import (
 
 	"github.com/alryzden/ProtoRadar/internal/cli/api"
 	"github.com/alryzden/ProtoRadar/internal/cli/config"
+	"github.com/alryzden/ProtoRadar/internal/version"
 )
 
 type App struct {
@@ -27,10 +28,23 @@ func (app App) Run(ctx context.Context, args []string) error {
 	if len(args) == 0 {
 		return app.usage()
 	}
+	if isHelp(args[0]) {
+		app.printHelp("root")
+		return nil
+	}
 
 	switch args[0] {
+	case "help":
+		topic := "root"
+		if len(args) > 1 {
+			topic = strings.Join(args[1:], " ")
+		}
+		app.printHelp(topic)
+		return nil
 	case "login":
 		return app.login(ctx, args[1:])
+	case "version":
+		return app.version()
 	case "module":
 		return app.module(ctx, args[1:])
 	case "push":
@@ -43,12 +57,18 @@ func (app App) Run(ctx context.Context, args []string) error {
 		return app.pull(ctx, args[1:])
 	case "list":
 		return app.list(ctx, args[1:])
+	case "runtime":
+		return app.runtime(ctx, args[1:])
 	default:
 		return fmt.Errorf("unknown command %q", args[0])
 	}
 }
 
 func (app App) login(ctx context.Context, args []string) error {
+	if hasHelp(args) {
+		app.printHelp("login")
+		return nil
+	}
 	flags := flag.NewFlagSet("login", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	serverURL := flags.String("server", "", "ProtoRadar server URL")
@@ -88,9 +108,15 @@ func (app App) module(ctx context.Context, args []string) error {
 	if len(args) == 0 {
 		return errors.New("module requires a subcommand")
 	}
+	if isHelp(args[0]) {
+		app.printHelp("module")
+		return nil
+	}
 	switch args[0] {
 	case "create":
 		return app.createModule(ctx, args[1:])
+	case "list":
+		return app.list(ctx, args[1:])
 	case "link-gitlab":
 		return app.linkModuleGitLab(ctx, args[1:])
 	case "dependencies":
@@ -103,6 +129,10 @@ func (app App) module(ctx context.Context, args []string) error {
 }
 
 func (app App) createModule(ctx context.Context, args []string) error {
+	if hasHelp(args) {
+		app.printHelp("module create")
+		return nil
+	}
 	flags := flag.NewFlagSet("module create", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	description := flags.String("description", "", "module description")
@@ -135,6 +165,10 @@ func (app App) createModule(ctx context.Context, args []string) error {
 }
 
 func (app App) linkModuleGitLab(ctx context.Context, args []string) error {
+	if hasHelp(args) {
+		app.printHelp("module link-gitlab")
+		return nil
+	}
 	flags := flag.NewFlagSet("module link-gitlab", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	projectID := flags.String("project-id", "", "GitLab project ID")
@@ -216,6 +250,10 @@ func (app App) linkModuleGitLab(ctx context.Context, args []string) error {
 }
 
 func (app App) moduleDependencies(ctx context.Context, args []string) error {
+	if hasHelp(args) {
+		app.printHelp("module dependencies")
+		return nil
+	}
 	flags := flag.NewFlagSet("module dependencies", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	if err := flags.Parse(flagsFirst(args, nil)); err != nil {
@@ -245,6 +283,10 @@ func (app App) moduleDependencies(ctx context.Context, args []string) error {
 }
 
 func (app App) moduleAffected(ctx context.Context, args []string) error {
+	if hasHelp(args) {
+		app.printHelp("module affected")
+		return nil
+	}
 	flags := flag.NewFlagSet("module affected", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	if err := flags.Parse(flagsFirst(args, nil)); err != nil {
@@ -274,6 +316,10 @@ func (app App) moduleAffected(ctx context.Context, args []string) error {
 }
 
 func (app App) list(ctx context.Context, args []string) error {
+	if hasHelp(args) {
+		app.printHelp("list")
+		return nil
+	}
 	if len(args) != 0 {
 		return errors.New("list does not accept arguments")
 	}
@@ -303,6 +349,10 @@ func (app App) list(ctx context.Context, args []string) error {
 }
 
 func (app App) push(ctx context.Context, args []string) error {
+	if hasHelp(args) {
+		app.printHelp("push")
+		return nil
+	}
 	flags := flag.NewFlagSet("push", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	version := flags.String("version", "", "module version")
@@ -382,6 +432,10 @@ func (app App) push(ctx context.Context, args []string) error {
 }
 
 func (app App) checkBreaking(ctx context.Context, args []string) error {
+	if hasHelp(args) {
+		app.printHelp("check-breaking")
+		return nil
+	}
 	flags := flag.NewFlagSet("check-breaking", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	path := flags.String("path", "", "Buf workspace root")
@@ -443,6 +497,10 @@ func (app App) checkBreaking(ctx context.Context, args []string) error {
 }
 
 func (app App) pull(ctx context.Context, args []string) error {
+	if hasHelp(args) {
+		app.printHelp("pull")
+		return nil
+	}
 	flags := flag.NewFlagSet("pull", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	version := flags.String("version", "", "module version")
@@ -481,8 +539,144 @@ func (app App) pull(ctx context.Context, args []string) error {
 	return nil
 }
 
+func (app App) version() error {
+	info := version.Info()
+	fmt.Fprintf(app.output(), "version: %s\n", info.Version)
+	fmt.Fprintf(app.output(), "commit: %s\n", info.Commit)
+	fmt.Fprintf(app.output(), "build_date: %s\n", info.BuildDate)
+	return nil
+}
+
 func (app App) usage() error {
-	return errors.New("usage: protoradar <login|module|push|check-breaking|gitlab|pull|list>")
+	return errors.New("usage: protoradar <login|version|module|push|check-breaking|gitlab|pull|list|runtime>")
+}
+
+func (app App) printHelp(topic string) {
+	fmt.Fprint(app.output(), commandHelp(strings.TrimSpace(topic)))
+}
+
+func hasHelp(args []string) bool {
+	return len(args) > 0 && isHelp(args[0])
+}
+
+func isHelp(arg string) bool {
+	return arg == "-h" || arg == "--help" || arg == "help"
+}
+
+func commandHelp(topic string) string {
+	switch topic {
+	case "login":
+		return `Usage:
+  protoradar login --server <url> --token <token>
+
+Stores credentials for later CLI commands. The token is never printed.
+`
+	case "module":
+		return `Usage:
+  protoradar module <create|list|link-gitlab|dependencies|affected> [flags]
+`
+	case "module create":
+		return `Usage:
+  protoradar module create <module> [--description <text>] [--repository-url <url>]
+
+Example:
+  protoradar module create user-api --description "User API contracts"
+`
+	case "module link-gitlab":
+		return `Usage:
+  protoradar module link-gitlab <module> --project-id <id> --project-path <path> --gitlab-base-url <url>
+`
+	case "module dependencies":
+		return `Usage:
+  protoradar module dependencies <module>
+
+Shows direct upstream, downstream, and unresolved protobuf dependencies.
+`
+	case "module affected":
+		return `Usage:
+  protoradar module affected <module>
+
+Shows direct downstream modules currently known to depend on the module.
+`
+	case "list":
+		return `Usage:
+  protoradar list
+  protoradar module list
+`
+	case "push":
+		return `Usage:
+  protoradar push <module> --version <version> --path <buf-workspace>
+`
+	case "pull":
+		return `Usage:
+  protoradar pull <module> --version <version> --output <directory> [--force]
+`
+	case "check-breaking":
+		return `Usage:
+  protoradar check-breaking <module> --path <buf-workspace> [--against latest|<version>] [--target-ref <ref>] [--report-file <path>]
+
+Exit codes:
+  0 no breaking changes
+  1 breaking changes found
+  2 input, auth, network, server, config, or internal error
+`
+	case "gitlab":
+		return `Usage:
+  protoradar gitlab mr-check [flags]
+`
+	case "gitlab mr-check":
+		return `Usage:
+  protoradar gitlab mr-check --module <module> --path <buf-workspace> --gitlab-base-url <url> --project-id <id> --merge-request-iid <iid> --commit-sha <sha> --gitlab-token <token>
+
+In GitLab CI, PROTORADAR_SERVER_URL, PROTORADAR_TOKEN, and PROTORADAR_GITLAB_TOKEN are supported.
+Exit code 1 means breaking changes were found, not a tool failure.
+`
+	case "runtime":
+		return `Usage:
+  protoradar runtime report [--from-file <path>] [--module <module@version>]...
+`
+	case "runtime report":
+		return `Usage:
+  protoradar runtime report --service <service> --environment <env> --git-commit <sha> --build-version <version> --module <module@version>
+  protoradar runtime report --from-file protoradar-runtime.yaml
+
+Drift statuses such as behind_latest or unknown_version are successful inventory results and exit 0.
+`
+	default:
+		return `ProtoRadar CLI
+
+Usage:
+  protoradar <command> [flags]
+
+Commands:
+  login                  Store server URL and API token.
+  version                Print version, commit, and build date.
+  module create          Create a protobuf module.
+  module list            List modules. Alias: protoradar list.
+  module link-gitlab     Link a module to a GitLab project.
+  module dependencies    Show direct upstream/downstream protobuf dependencies.
+  module affected        Show direct downstream modules affected by a module.
+  push                   Publish a Buf-compatible module version.
+  pull                   Download a published source artifact.
+  check-breaking         Run a server-side breaking-change check.
+  gitlab mr-check        Run GitLab MR bot check/comment/status flow.
+  runtime report         Report deployed module versions.
+
+Authentication:
+  Use protoradar login, or set PROTORADAR_SERVER_URL and PROTORADAR_TOKEN in CI.
+
+Exit codes:
+  0 success or no breaking changes
+  1 breaking changes found by check-breaking or gitlab mr-check
+  2 invalid input, auth, network, server, config, or internal error
+
+Examples:
+  protoradar login --server http://localhost:8080 --token <token>
+  protoradar module create user-api --description "User API contracts"
+  protoradar push user-api --version v1.0.0 --path examples/repos/user-api
+  protoradar check-breaking user-api --path . --against latest
+`
+	}
 }
 
 func (app App) configPath() (string, error) {

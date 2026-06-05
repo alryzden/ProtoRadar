@@ -7,6 +7,7 @@ ProtoRadar can run from GitLab CI for protobuf governance workflows:
 - simple breaking-change validation in merge request pipelines;
 - full merge-request bot comments and commit statuses;
 - publishing protobuf module versions from Git tags or release pipelines;
+- reporting runtime inventory after deploys;
 - linking ProtoRadar modules to GitLab projects.
 
 All CI workflows use the `protoradar` CLI and the ProtoRadar REST API. CI jobs authenticate to ProtoRadar with the same bearer-token flow used by local CLI commands.
@@ -20,6 +21,8 @@ Use `examples/gitlab/protoradar-breaking-check.yml` when you only need a pass/fa
 Use `examples/gitlab/protoradar-mr-check.yml` when you want ProtoRadar to comment directly on the merge request and set a commit status. This template requires `PROTORADAR_GITLAB_TOKEN`.
 
 Use `examples/gitlab/protoradar-publish.yml` to publish module versions from tag pipelines.
+
+Use `examples/gitlab/protoradar-runtime-report.yml` to report deployed module versions after deployment jobs.
 
 ## Required CI Variables
 
@@ -40,6 +43,11 @@ For the MR bot template, also configure:
 - `PROTORADAR_CLI_IMAGE`: container image containing the `protoradar` CLI on `PATH`.
 - `PROTORADAR_REPORT_FILE`: report artifact path. Defaults to `protoradar-breaking-report.txt` for the simple check and `protoradar-mr-report.md` for the MR bot.
 - `PROTORADAR_PUBLISH_VERSION`: publish version override. Defaults to `CI_COMMIT_TAG` in tag pipelines.
+- `PROTORADAR_SERVICE`: runtime service name. Defaults to `CI_PROJECT_NAME` in runtime reporting.
+- `PROTORADAR_ENVIRONMENT`: runtime environment. Defaults to `CI_ENVIRONMENT_NAME` in runtime reporting.
+- `PROTORADAR_BUILD_VERSION`: runtime build version. Defaults to `CI_COMMIT_TAG` or `CI_COMMIT_SHORT_SHA`.
+- `PROTORADAR_RUNTIME_FILE`: runtime report file path. Defaults to `protoradar-runtime.yaml`.
+- `PROTORADAR_RUNTIME_MODULES`: space-separated `module@version` values for flag-based runtime reporting.
 
 ## Full MR Bot in Merge Requests
 
@@ -50,7 +58,7 @@ Minimal `.gitlab-ci.yml`:
 ```yaml
 include:
   - project: platform/protoradar
-    ref: v0.5.0
+    ref: v1.0.0
     file:
       - /examples/gitlab/protoradar-mr-check.yml
 
@@ -153,6 +161,53 @@ protoradar push "$PROTORADAR_MODULE" \
 `PROTORADAR_PUBLISH_VERSION` can override the version. If it is not set, `CI_COMMIT_TAG` is used. The job fails clearly when neither value is available.
 
 Publish at least one baseline version before expecting merge-request breaking checks to compare against `latest` or an explicit version. Breaking checks use the baseline version's stored Buf image artifact.
+
+## Runtime Inventory After Deploy
+
+Use `examples/gitlab/protoradar-runtime-report.yml` after deployment jobs to report which protobuf module versions are running.
+
+File-based example:
+
+```yaml
+include:
+  - project: your-group/protoradar
+    ref: main
+    file: examples/gitlab/protoradar-runtime-report.yml
+
+stages:
+  - deploy
+
+deploy:production:
+  stage: deploy
+  environment:
+    name: production
+  script:
+    - ./deploy.sh
+
+protoradar:runtime-report:
+  extends: .protoradar-runtime-report
+  stage: deploy
+  needs:
+    - deploy:production
+  variables:
+    PROTORADAR_RUNTIME_FILE: "protoradar-runtime.yaml"
+```
+
+Flag-based example:
+
+```yaml
+protoradar:runtime-report:
+  extends: .protoradar-runtime-report
+  stage: deploy
+  variables:
+    PROTORADAR_SERVICE: "billing-service"
+    PROTORADAR_ENVIRONMENT: "production"
+    PROTORADAR_RUNTIME_MODULES: "user-api@v1.2.0 billing-api@v1.4.0"
+```
+
+The template uses `PROTORADAR_SERVER_URL` and `PROTORADAR_TOKEN` for CLI auth. It also uses GitLab predefined variables including `CI_PROJECT_NAME`, `CI_ENVIRONMENT_NAME`, `CI_COMMIT_SHA`, `CI_COMMIT_TAG`, and `CI_COMMIT_SHORT_SHA`.
+
+Runtime drift statuses are normal successful results. A report with `behind_latest` or `unknown_version` still exits `0` when the report is accepted.
 
 ## Module-to-GitLab Project Mapping
 

@@ -211,6 +211,100 @@ func TestRenderCapsDisplayedAffectedModulesAndIncludesOverflowMessage(t *testing
 	assertContains(t, output, "_And 1 more modules. See ProtoRadar UI for the full dependency graph._")
 }
 
+func TestRenderIncludesRuntimeImpactTable(t *testing.T) {
+	output := RenderReport(Report{
+		Module:  "user-api",
+		Against: "v1.2.0",
+		Status:  "breaking",
+		RuntimeImpacts: []RuntimeImpact{{
+			ServiceName:  "billing-service",
+			Environment:  "production",
+			UsedModule:   "user-api",
+			UsedVersion:  "v1.2.0",
+			BuildVersion: "2026.06.04-15",
+			GitCommit:    "abc1234",
+		}},
+	}, RenderOptions{})
+
+	assertContains(t, output, "### Runtime impact")
+	assertContains(t, output, "| Service | Environment | Uses | Build | Commit |")
+	assertContains(t, output, "| `billing-service` | `production` | `user-api@v1.2.0` | `2026.06.04-15` | `abc1234` |")
+}
+
+func TestRenderIncludesEmptyRuntimeImpactMessage(t *testing.T) {
+	output := RenderReport(Report{Module: "user-api", Status: "passed"}, RenderOptions{})
+
+	assertContains(t, output, "### Runtime impact")
+	assertContains(t, output, "No runtime services are currently known to use the affected module version.")
+}
+
+func TestRenderRuntimeImpactUnavailableWarning(t *testing.T) {
+	output := RenderReport(Report{Module: "user-api", Status: "breaking", RuntimeImpactUnavailable: true}, RenderOptions{})
+
+	assertContains(t, output, "### Runtime impact")
+	assertContains(t, output, "Runtime impact could not be loaded. Check CI logs.")
+}
+
+func TestRenderCapsRuntimeImpactRowsAndIncludesOverflowMessage(t *testing.T) {
+	output := RenderReport(Report{
+		Module: "user-api",
+		Status: "breaking",
+		RuntimeImpacts: []RuntimeImpact{
+			{ServiceName: "one-service", Environment: "production", UsedModule: "user-api", UsedVersion: "v1.0.0"},
+			{ServiceName: "two-service", Environment: "production", UsedModule: "user-api", UsedVersion: "v1.0.0"},
+			{ServiceName: "three-service", Environment: "production", UsedModule: "user-api", UsedVersion: "v1.0.0"},
+		},
+	}, RenderOptions{MaxDisplayedRuntimeImpacts: 2})
+
+	assertContains(t, output, "one-service")
+	assertContains(t, output, "two-service")
+	assertNotContains(t, output, "three-service")
+	assertContains(t, output, "_And 1 more runtime usages. See ProtoRadar UI for the full runtime inventory._")
+}
+
+func TestRenderEscapesRuntimeImpactTableValues(t *testing.T) {
+	output := RenderReport(Report{
+		Module: "user-api",
+		Status: "breaking",
+		RuntimeImpacts: []RuntimeImpact{{
+			ServiceName:  "billing|service",
+			Environment:  "prod|uction",
+			UsedModule:   "user|api",
+			UsedVersion:  "v1|2|0",
+			BuildVersion: "build|15",
+			GitCommit:    "abc|123",
+		}},
+	}, RenderOptions{})
+
+	assertContains(t, output, `billing\|service`)
+	assertContains(t, output, `prod\|uction`)
+	assertContains(t, output, `user\|api@v1\|2\|0`)
+	assertContains(t, output, `build\|15`)
+	assertContains(t, output, `abc\|123`)
+}
+
+func TestRenderKeepsAffectedModulesWithRuntimeImpact(t *testing.T) {
+	output := RenderReport(Report{
+		Module: "user-api",
+		Status: "breaking",
+		AffectedModules: []AffectedModule{{
+			Module:        "billing-api",
+			LatestVersion: "v1.4.0",
+		}},
+		RuntimeImpacts: []RuntimeImpact{{
+			ServiceName: "billing-service",
+			Environment: "production",
+			UsedModule:  "user-api",
+			UsedVersion: "v1.2.0",
+		}},
+	}, RenderOptions{})
+
+	assertContains(t, output, "### Potentially Affected Modules")
+	assertContains(t, output, "billing-api")
+	assertContains(t, output, "### Runtime impact")
+	assertContains(t, output, "billing-service")
+}
+
 func TestRenderIncludesHiddenMarker(t *testing.T) {
 	output := RenderReport(Report{Module: "user-api", Status: "passed"}, RenderOptions{})
 	if !strings.HasPrefix(output, BuildMarker("user-api")+"\n") {
@@ -237,12 +331,21 @@ func TestRenderRedactsTokensAndSecrets(t *testing.T) {
 			DependencySources: []string{"import|type"},
 			Reasons:           []string{"private_token=glpat-another-secret"},
 		}},
+		RuntimeImpacts: []RuntimeImpact{{
+			ServiceName:  "billing-service",
+			Environment:  "production",
+			UsedModule:   "user-api",
+			UsedVersion:  "v1.2.0",
+			BuildVersion: "build-private_token=glpat-runtime-secret",
+			GitCommit:    "abc123",
+		}},
 	}, RenderOptions{})
 
 	assertNotContains(t, output, "glpat-secret-token")
 	assertNotContains(t, output, "prr_supersecret")
 	assertNotContains(t, output, "hunter2")
 	assertNotContains(t, output, "glpat-another-secret")
+	assertNotContains(t, output, "glpat-runtime-secret")
 	assertContains(t, output, `billing\|api`)
 	assertContains(t, output, `v1.0.0\|secret`)
 	assertContains(t, output, `import\|type`)
