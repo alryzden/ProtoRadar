@@ -14,7 +14,16 @@ RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X ${VERSION_PKG}.Version=$
 
 FROM bufbuild/buf:1.55.1 AS buf
 
-FROM alpine:3.22
+FROM alpine:3.22 AS cli
+
+RUN apk add --no-cache ca-certificates
+
+COPY --from=build /out/protoradar /usr/local/bin/protoradar
+
+USER 65532:65532
+ENTRYPOINT ["protoradar"]
+
+FROM alpine:3.22 AS server
 
 RUN apk add --no-cache ca-certificates
 

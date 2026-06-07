@@ -31,7 +31,7 @@ func ExtractTarGzSafe(ctx context.Context, reader io.Reader, dst string, options
 	if err != nil {
 		return err
 	}
-	defer gzipReader.Close()
+	defer closeGzipReader(gzipReader)
 
 	tarReader := tar.NewReader(gzipReader)
 	var totalSize int64
@@ -71,7 +71,7 @@ func ExtractTarGzSafe(ctx context.Context, reader io.Reader, dst string, options
 			if err := os.MkdirAll(target, 0o755); err != nil {
 				return err
 			}
-		case tar.TypeReg, tar.TypeRegA:
+		case tar.TypeReg, 0: // 0 is the legacy regular-file marker formerly exposed as tar.TypeRegA.
 			if header.Size < 0 {
 				return fmt.Errorf("unsafe archive path %q has negative size", header.Name)
 			}
@@ -90,6 +90,11 @@ func ExtractTarGzSafe(ctx context.Context, reader io.Reader, dst string, options
 			return fmt.Errorf("unsupported archive entry %q", header.Name)
 		}
 	}
+}
+
+func closeGzipReader(reader io.Closer) {
+	// Extraction reports tar/copy/file close errors; gzip close is cleanup.
+	_ = reader.Close() //nolint:errcheck
 }
 
 func writeRegularFile(target string, reader io.Reader, size int64) error {

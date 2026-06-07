@@ -298,6 +298,9 @@ func TestRuntimeInventoryRepositoryRuntimeImpactByExactModuleVersion(t *testing.
 	if impact[0].ImpactStatus != domain.RuntimeImpactStatusPotentiallyAffectedByBreakingChange {
 		t.Fatalf("impact status = %q", impact[0].ImpactStatus)
 	}
+	if impact[0].DriftStatus != domain.RuntimeDriftStatusUpToDate || impact[0].DriftReason != domain.RuntimeDriftStatusUpToDate.String() {
+		t.Fatalf("impact drift = %#v", impact[0])
+	}
 }
 
 func TestRuntimeInventoryRepositoryTransactionRollback(t *testing.T) {

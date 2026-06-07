@@ -97,6 +97,8 @@ func TestRunnerFetchesRuntimeImpactWhenReportIDExists(t *testing.T) {
 		UsedVersion:  "v1.2.0",
 		BuildVersion: "2026.06.04-15",
 		GitCommit:    "abc1234",
+		DriftStatus:  "deprecated_version",
+		DriftReason:  "deprecated_version",
 	}}}
 	runner.RuntimeImpactClient = runtimeImpact
 
@@ -111,7 +113,7 @@ func TestRunnerFetchesRuntimeImpactWhenReportIDExists(t *testing.T) {
 		t.Fatalf("breaking calls=%d runtime calls=%d reportIDs=%#v", breaking.calls, runtimeImpact.calls, runtimeImpact.reportIDs)
 	}
 	assertContains(t, gitlabClient.createdBodies[0], "### Runtime impact")
-	assertContains(t, gitlabClient.createdBodies[0], "| `billing-service` | `production` | `user-api@v1.2.0` | `2026.06.04-15` | `abc1234` |")
+	assertContains(t, gitlabClient.createdBodies[0], "| `billing-service` | `production` | `user-api@v1.2.0` | `2026.06.04-15` | `abc1234` | `deprecated_version` | deprecated_version |")
 }
 
 func TestRunnerRuntimeImpactFailureDoesNotFailBreakingCheck(t *testing.T) {
@@ -211,6 +213,149 @@ func TestBreakingCheckSetsCommitStatusFailed(t *testing.T) {
 		t.Fatalf("result = %#v", result)
 	}
 	assertStatusStates(t, gitlabClient.statuses, gitlab.CommitStatusStateRunning, gitlab.CommitStatusStateFailed)
+}
+
+func TestGovernanceModeCreatesApprovalRequestWhenStatusMissing(t *testing.T) {
+	runner, breaking, gitlabClient := newTestRunner()
+	breaking.report = breakingReport()
+	governance := &fakeGovernanceClient{
+		getErr: ErrGovernanceNotFound,
+		createStatus: GovernanceStatus{
+			ID:     "approval-1",
+			Status: "pending",
+			Requirements: []GovernanceRequirement{{
+				RequirementType:  "module_owner_approval",
+				TargetModuleName: "user-api",
+				Status:           "pending",
+				Reason:           "Breaking changes require approval from module owner",
+			}},
+		},
+	}
+	runner.GovernanceClient = governance
+	input := validInput()
+	input.GovernanceEnabled = true
+
+	result, err := runner.Run(context.Background(), input)
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if result.ExitCode != ExitCodeBreaking || governance.getCalls != 1 || governance.createCalls != 1 {
+		t.Fatalf("result=%#v governance=%#v", result, governance)
+	}
+	if governance.createActors[0] != "" {
+		t.Fatalf("approval actor should be empty by default: %#v", governance.createActors)
+	}
+	assertContains(t, gitlabClient.createdBodies[0], "### Governance")
+	assertContains(t, gitlabClient.createdBodies[0], "Status: ⏳ Approval required")
+	assertStatusStates(t, gitlabClient.statuses, gitlab.CommitStatusStateRunning, gitlab.CommitStatusStateFailed)
+}
+
+func TestGovernanceModeSendsActorOnlyWhenExplicitlyConfigured(t *testing.T) {
+	runner, breaking, _ := newTestRunner()
+	breaking.report = breakingReport()
+	governance := &fakeGovernanceClient{
+		getErr:       ErrGovernanceNotFound,
+		createStatus: GovernanceStatus{ID: "approval-1", Status: "pending"},
+	}
+	runner.GovernanceClient = governance
+	input := validInput()
+	input.GovernanceEnabled = true
+	input.GovernanceActor = "ci-override"
+
+	_, err := runner.Run(context.Background(), input)
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if len(governance.createActors) != 1 || governance.createActors[0] != "ci-override" {
+		t.Fatalf("create actors = %#v", governance.createActors)
+	}
+}
+
+func TestGovernanceModeActorOverrideRejectionIsClearAndRedacted(t *testing.T) {
+	runner, breaking, _ := newTestRunner()
+	breaking.report = breakingReport()
+	governance := &fakeGovernanceClient{
+		getErr:    ErrGovernanceNotFound,
+		createErr: errors.New("Governance actor is not allowed for PROTORADAR_TOKEN=prr_supersecret"),
+	}
+	runner.GovernanceClient = governance
+	input := validInput()
+	input.GovernanceEnabled = true
+	input.GovernanceActor = "alice"
+
+	result, err := runner.Run(context.Background(), input)
+	if err == nil || result.ExitCode != ExitCodeError {
+		t.Fatalf("result=%#v err=%v", result, err)
+	}
+	if !strings.Contains(err.Error(), "server rejected governance actor override") || !strings.Contains(err.Error(), "omit --governance-actor") {
+		t.Fatalf("error = %v", err)
+	}
+	if strings.Contains(err.Error(), "prr_supersecret") || strings.Contains(result.Markdown, "prr_supersecret") {
+		t.Fatalf("token leaked: result=%#v err=%v", result, err)
+	}
+}
+
+func TestGovernanceModeApprovedBreakingChangeExitsZero(t *testing.T) {
+	runner, breaking, gitlabClient := newTestRunner()
+	breaking.report = breakingReport()
+	runner.GovernanceClient = &fakeGovernanceClient{getStatus: GovernanceStatus{ID: "approval-1", Status: "approved"}}
+	input := validInput()
+	input.GovernanceEnabled = true
+
+	result, err := runner.Run(context.Background(), input)
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if result.ExitCode != ExitCodePassed {
+		t.Fatalf("result = %#v", result)
+	}
+	assertContains(t, gitlabClient.createdBodies[0], "Status: ✅ Approved")
+	assertStatusStates(t, gitlabClient.statuses, gitlab.CommitStatusStateRunning, gitlab.CommitStatusStateSuccess)
+}
+
+func TestGovernanceModeRejectedBreakingChangeExitsOne(t *testing.T) {
+	runner, breaking, gitlabClient := newTestRunner()
+	breaking.report = breakingReport()
+	runner.GovernanceClient = &fakeGovernanceClient{getStatus: GovernanceStatus{ID: "approval-1", Status: "rejected"}}
+	input := validInput()
+	input.GovernanceEnabled = true
+
+	result, err := runner.Run(context.Background(), input)
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if result.ExitCode != ExitCodeBreaking {
+		t.Fatalf("result = %#v", result)
+	}
+	assertContains(t, gitlabClient.createdBodies[0], "Status: ❌ Rejected")
+	assertStatusStates(t, gitlabClient.statuses, gitlab.CommitStatusStateRunning, gitlab.CommitStatusStateFailed)
+}
+
+func TestGovernanceFalseKeepsOldBreakingExitBehavior(t *testing.T) {
+	runner, breaking, _ := newTestRunner()
+	breaking.report = breakingReport()
+	runner.GovernanceClient = &fakeGovernanceClient{getStatus: GovernanceStatus{ID: "approval-1", Status: "approved"}}
+
+	result, err := runner.Run(context.Background(), validInput())
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if result.ExitCode != ExitCodeBreaking {
+		t.Fatalf("result = %#v", result)
+	}
+}
+
+func TestGovernanceModeErrorReturnsExitCodeTwo(t *testing.T) {
+	runner, breaking, _ := newTestRunner()
+	breaking.report = breakingReport()
+	runner.GovernanceClient = &fakeGovernanceClient{getErr: errors.New("governance API failed")}
+	input := validInput()
+	input.GovernanceEnabled = true
+
+	result, err := runner.Run(context.Background(), input)
+	if err == nil || result.ExitCode != ExitCodeError {
+		t.Fatalf("result=%#v err=%v", result, err)
+	}
 }
 
 func TestStatusFalseSkipsCommitStatusCalls(t *testing.T) {
@@ -471,6 +616,36 @@ func (fake *fakeRuntimeImpactClient) ListRuntimeImpact(ctx context.Context, repo
 		return nil, fake.err
 	}
 	return fake.items, nil
+}
+
+type fakeGovernanceClient struct {
+	getStatus    GovernanceStatus
+	createStatus GovernanceStatus
+	getErr       error
+	createErr    error
+	getCalls     int
+	createCalls  int
+	reportIDs    []string
+	createActors []string
+}
+
+func (fake *fakeGovernanceClient) GetApprovalStatus(ctx context.Context, reportID string) (GovernanceStatus, error) {
+	fake.getCalls++
+	fake.reportIDs = append(fake.reportIDs, reportID)
+	if fake.getErr != nil {
+		return GovernanceStatus{}, fake.getErr
+	}
+	return fake.getStatus, nil
+}
+
+func (fake *fakeGovernanceClient) CreateApprovalRequest(ctx context.Context, reportID string, actor string) (GovernanceStatus, error) {
+	fake.createCalls++
+	fake.reportIDs = append(fake.reportIDs, reportID)
+	fake.createActors = append(fake.createActors, actor)
+	if fake.createErr != nil {
+		return GovernanceStatus{}, fake.createErr
+	}
+	return fake.createStatus, nil
 }
 
 type fakeGitLabClient struct {

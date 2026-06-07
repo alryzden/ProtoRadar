@@ -415,3 +415,234 @@ func TestNewModuleDependenciesUpdated(t *testing.T) {
 	assertNoRawTokenOrInfrastructureDetails(t, record.EventType)
 	assertNoRawTokenOrInfrastructureDetails(t, record.DedupKey)
 }
+
+func TestNewApprovalRequestCreated(t *testing.T) {
+	occurredAt := time.Date(2026, 6, 5, 10, 0, 0, 0, time.UTC)
+	moduleName, err := domain.NewModuleName("user-api")
+	if err != nil {
+		t.Fatalf("module name: %v", err)
+	}
+	reportID := domain.NewBreakingReportID("report-1")
+
+	record, err := NewApprovalRequestCreated(ApprovalRequestCreated{
+		Request: domain.ApprovalRequest{
+			ID:                domain.NewApprovalRequestID("approval-request-1"),
+			ModuleID:          domain.NewModuleID("module-1"),
+			ModuleName:        moduleName,
+			BreakingReportID:  &reportID,
+			TargetRef:         "feature/change",
+			Status:            domain.ApprovalRequestStatusPending,
+			RequiredApprovals: 2,
+			ReceivedApprovals: 0,
+			CreatedAt:         occurredAt,
+		},
+		Actor:      "alice",
+		OccurredAt: occurredAt,
+	})
+	if err != nil {
+		t.Fatalf("event: %v", err)
+	}
+
+	if record.EventType != EventTypeApprovalRequestCreated {
+		t.Fatalf("event type = %q, want %q", record.EventType, EventTypeApprovalRequestCreated)
+	}
+	if record.DedupKey != "approval-request:approval-request-1:created" {
+		t.Fatalf("dedup key = %q", record.DedupKey)
+	}
+	if record.AggregateType != aggregateTypeApprovalRequest || record.AggregateID != "approval-request-1" {
+		t.Fatalf("aggregate = %s/%s", record.AggregateType, record.AggregateID)
+	}
+
+	var payload ApprovalRequestCreatedPayload
+	if err := json.Unmarshal(record.Payload, &payload); err != nil {
+		t.Fatalf("payload json: %v", err)
+	}
+	if payload.ApprovalRequestID != "approval-request-1" {
+		t.Fatalf("approval_request_id = %q", payload.ApprovalRequestID)
+	}
+	if payload.ModuleID != "module-1" || payload.ModuleName != "user-api" {
+		t.Fatalf("module = %s/%s", payload.ModuleID, payload.ModuleName)
+	}
+	if payload.BreakingReportID != "report-1" {
+		t.Fatalf("breaking_report_id = %q", payload.BreakingReportID)
+	}
+	if payload.TargetRef != "feature/change" {
+		t.Fatalf("target_ref = %q", payload.TargetRef)
+	}
+	if payload.Status != "pending" || payload.RequiredApprovals != 2 || payload.ReceivedApprovals != 0 {
+		t.Fatalf("status/counts = %s/%d/%d", payload.Status, payload.RequiredApprovals, payload.ReceivedApprovals)
+	}
+	if payload.Actor != "alice" {
+		t.Fatalf("actor = %q", payload.Actor)
+	}
+	if !payload.OccurredAt.Equal(occurredAt) {
+		t.Fatalf("occurred_at = %s, want %s", payload.OccurredAt, occurredAt)
+	}
+
+	payloadText := string(record.Payload)
+	if !strings.Contains(payloadText, "\"approval_request_id\":\"approval-request-1\"") {
+		t.Fatalf("payload should use expected snake_case fields: %s", payloadText)
+	}
+	assertNoRawTokenOrInfrastructureDetails(t, payloadText)
+	assertNoRawTokenOrInfrastructureDetails(t, record.EventType)
+	assertNoRawTokenOrInfrastructureDetails(t, record.DedupKey)
+}
+
+func TestNewApprovalDecisionRecorded(t *testing.T) {
+	occurredAt := time.Date(2026, 6, 5, 10, 30, 0, 0, time.UTC)
+	moduleName, err := domain.NewModuleName("billing-api")
+	if err != nil {
+		t.Fatalf("module name: %v", err)
+	}
+	reportID := domain.NewBreakingReportID("report-2")
+
+	record, err := NewApprovalDecisionRecorded(ApprovalDecisionRecorded{
+		Decision: domain.ApprovalDecision{
+			ID:                domain.NewApprovalDecisionID("approval-decision-1"),
+			ApprovalRequestID: domain.NewApprovalRequestID("approval-request-2"),
+			RequirementID:     domain.NewApprovalRequirementID("requirement-1"),
+			Decision:          domain.ApprovalDecisionValueApproved,
+			DecidedBy:         "team/platform",
+			Comment:           "comment should not be emitted",
+			CreatedAt:         occurredAt,
+		},
+		ModuleID:         domain.NewModuleID("module-2"),
+		ModuleName:       moduleName,
+		BreakingReportID: &reportID,
+		OccurredAt:       occurredAt,
+	})
+	if err != nil {
+		t.Fatalf("event: %v", err)
+	}
+
+	if record.EventType != EventTypeApprovalDecisionRecorded {
+		t.Fatalf("event type = %q, want %q", record.EventType, EventTypeApprovalDecisionRecorded)
+	}
+	if record.DedupKey != "approval-decision:approval-decision-1:recorded" {
+		t.Fatalf("dedup key = %q", record.DedupKey)
+	}
+	if record.AggregateType != aggregateTypeApprovalRequest || record.AggregateID != "approval-request-2" {
+		t.Fatalf("aggregate = %s/%s", record.AggregateType, record.AggregateID)
+	}
+
+	var payload ApprovalDecisionRecordedPayload
+	if err := json.Unmarshal(record.Payload, &payload); err != nil {
+		t.Fatalf("payload json: %v", err)
+	}
+	if payload.ApprovalDecisionID != "approval-decision-1" {
+		t.Fatalf("approval_decision_id = %q", payload.ApprovalDecisionID)
+	}
+	if payload.ApprovalRequestID != "approval-request-2" || payload.RequirementID != "requirement-1" {
+		t.Fatalf("request/requirement = %s/%s", payload.ApprovalRequestID, payload.RequirementID)
+	}
+	if payload.Decision != "approved" || payload.DecidedBy != "team/platform" {
+		t.Fatalf("decision = %s by %s", payload.Decision, payload.DecidedBy)
+	}
+	if payload.ModuleID != "module-2" || payload.ModuleName != "billing-api" {
+		t.Fatalf("module = %s/%s", payload.ModuleID, payload.ModuleName)
+	}
+	if payload.BreakingReportID != "report-2" {
+		t.Fatalf("breaking_report_id = %q", payload.BreakingReportID)
+	}
+	if !payload.OccurredAt.Equal(occurredAt) {
+		t.Fatalf("occurred_at = %s, want %s", payload.OccurredAt, occurredAt)
+	}
+
+	payloadText := string(record.Payload)
+	for _, forbidden := range []string{"comment should not be emitted", "token", "secret", "password"} {
+		if strings.Contains(strings.ToLower(payloadText), forbidden) {
+			t.Fatalf("payload contains forbidden content %q: %s", forbidden, payloadText)
+		}
+	}
+	assertNoRawTokenOrInfrastructureDetails(t, payloadText)
+	assertNoRawTokenOrInfrastructureDetails(t, record.EventType)
+	assertNoRawTokenOrInfrastructureDetails(t, record.DedupKey)
+}
+
+func TestNewModuleOwnerAdded(t *testing.T) {
+	occurredAt := time.Date(2026, 6, 5, 12, 0, 0, 0, time.UTC)
+	moduleName, err := domain.NewModuleName("user-api")
+	if err != nil {
+		t.Fatalf("module name: %v", err)
+	}
+	owner := domain.ModuleOwner{
+		ID:          domain.NewModuleOwnerID("owner-1"),
+		ModuleID:    domain.NewModuleID("module-1"),
+		ModuleName:  moduleName,
+		SubjectType: domain.GovernanceSubjectTypeUser,
+		Subject:     "alice",
+		Role:        domain.ModuleOwnerRoleOwner,
+		CreatedAt:   occurredAt,
+	}
+
+	record, err := NewModuleOwnerAdded(ModuleOwnerAdded{Owner: owner, Actor: "admin", OccurredAt: occurredAt})
+	if err != nil {
+		t.Fatalf("event: %v", err)
+	}
+	if record.EventType != EventTypeModuleOwnerAdded {
+		t.Fatalf("event type = %q, want %q", record.EventType, EventTypeModuleOwnerAdded)
+	}
+	if record.DedupKey != "module:module-1:owner:owner-1:added" {
+		t.Fatalf("dedup key = %q", record.DedupKey)
+	}
+	if record.AggregateType != aggregateTypeModule || record.AggregateID != "module-1" {
+		t.Fatalf("aggregate = %s/%s", record.AggregateType, record.AggregateID)
+	}
+	var payload ModuleOwnerAddedPayload
+	if err := json.Unmarshal(record.Payload, &payload); err != nil {
+		t.Fatalf("payload json: %v", err)
+	}
+	if payload.OwnerID != "owner-1" || payload.ModuleName != "user-api" || payload.SubjectType != "user" || payload.Subject != "alice" || payload.Role != "owner" || payload.Actor != "admin" {
+		t.Fatalf("payload = %#v", payload)
+	}
+	if !payload.OccurredAt.Equal(occurredAt) {
+		t.Fatalf("occurred_at = %s, want %s", payload.OccurredAt, occurredAt)
+	}
+	assertNoRawTokenOrInfrastructureDetails(t, string(record.Payload))
+	assertNoRawTokenOrInfrastructureDetails(t, record.EventType)
+	assertNoRawTokenOrInfrastructureDetails(t, record.DedupKey)
+}
+
+func TestNewModuleOwnerRemoved(t *testing.T) {
+	occurredAt := time.Date(2026, 6, 5, 12, 30, 0, 0, time.UTC)
+	moduleName, err := domain.NewModuleName("billing-api")
+	if err != nil {
+		t.Fatalf("module name: %v", err)
+	}
+	owner := domain.ModuleOwner{
+		ID:          domain.NewModuleOwnerID("owner-2"),
+		ModuleID:    domain.NewModuleID("module-2"),
+		ModuleName:  moduleName,
+		SubjectType: domain.GovernanceSubjectTypeTeam,
+		Subject:     "platform",
+		Role:        domain.ModuleOwnerRoleMaintainer,
+		UpdatedAt:   occurredAt,
+	}
+
+	record, err := NewModuleOwnerRemoved(ModuleOwnerRemoved{Owner: owner, Actor: "admin", OccurredAt: occurredAt})
+	if err != nil {
+		t.Fatalf("event: %v", err)
+	}
+	if record.EventType != EventTypeModuleOwnerRemoved {
+		t.Fatalf("event type = %q, want %q", record.EventType, EventTypeModuleOwnerRemoved)
+	}
+	if record.DedupKey != "module:module-2:owner:owner-2:removed" {
+		t.Fatalf("dedup key = %q", record.DedupKey)
+	}
+	if record.AggregateType != aggregateTypeModule || record.AggregateID != "module-2" {
+		t.Fatalf("aggregate = %s/%s", record.AggregateType, record.AggregateID)
+	}
+	var payload ModuleOwnerRemovedPayload
+	if err := json.Unmarshal(record.Payload, &payload); err != nil {
+		t.Fatalf("payload json: %v", err)
+	}
+	if payload.OwnerID != "owner-2" || payload.ModuleName != "billing-api" || payload.SubjectType != "team" || payload.Subject != "platform" || payload.Role != "maintainer" || payload.Actor != "admin" {
+		t.Fatalf("payload = %#v", payload)
+	}
+	if !payload.OccurredAt.Equal(occurredAt) {
+		t.Fatalf("occurred_at = %s, want %s", payload.OccurredAt, occurredAt)
+	}
+	assertNoRawTokenOrInfrastructureDetails(t, string(record.Payload))
+	assertNoRawTokenOrInfrastructureDetails(t, record.EventType)
+	assertNoRawTokenOrInfrastructureDetails(t, record.DedupKey)
+}

@@ -115,7 +115,7 @@ func TestRenderBreakingReportWithMultipleChanges(t *testing.T) {
 	assertContains(t, output, "| File | Symbol | Rule | Message |")
 	assertContains(t, output, "| user/v1/user.proto | user.v1.User.email | FIELD_SAME_TYPE | field changed type |")
 	assertContains(t, output, "| user/v1/user.proto | user.v1.UserService.GetUser | RPC_NO_DELETE | rpc was deleted |")
-	assertContains(t, output, "Restore compatibility, coordinate a major version, or wait for the future approval workflow.")
+	assertContains(t, output, "Restore compatibility, coordinate a major version, or complete the required governance approval workflow.")
 }
 
 func TestRenderErrorReport(t *testing.T) {
@@ -223,12 +223,14 @@ func TestRenderIncludesRuntimeImpactTable(t *testing.T) {
 			UsedVersion:  "v1.2.0",
 			BuildVersion: "2026.06.04-15",
 			GitCommit:    "abc1234",
+			DriftStatus:  "deprecated_version",
+			DriftReason:  "deprecated_version",
 		}},
 	}, RenderOptions{})
 
 	assertContains(t, output, "### Runtime impact")
-	assertContains(t, output, "| Service | Environment | Uses | Build | Commit |")
-	assertContains(t, output, "| `billing-service` | `production` | `user-api@v1.2.0` | `2026.06.04-15` | `abc1234` |")
+	assertContains(t, output, "| Service | Environment | Uses | Build | Commit | Runtime drift | Drift reason |")
+	assertContains(t, output, "| `billing-service` | `production` | `user-api@v1.2.0` | `2026.06.04-15` | `abc1234` | `deprecated_version` | deprecated_version |")
 }
 
 func TestRenderIncludesEmptyRuntimeImpactMessage(t *testing.T) {
@@ -273,6 +275,8 @@ func TestRenderEscapesRuntimeImpactTableValues(t *testing.T) {
 			UsedVersion:  "v1|2|0",
 			BuildVersion: "build|15",
 			GitCommit:    "abc|123",
+			DriftStatus:  "deprecated|version",
+			DriftReason:  "Use v1|3|0 instead",
 		}},
 	}, RenderOptions{})
 
@@ -281,6 +285,8 @@ func TestRenderEscapesRuntimeImpactTableValues(t *testing.T) {
 	assertContains(t, output, `user\|api@v1\|2\|0`)
 	assertContains(t, output, `build\|15`)
 	assertContains(t, output, `abc\|123`)
+	assertContains(t, output, `deprecated\|version`)
+	assertContains(t, output, `Use v1\|3\|0 instead`)
 }
 
 func TestRenderKeepsAffectedModulesWithRuntimeImpact(t *testing.T) {
@@ -303,6 +309,105 @@ func TestRenderKeepsAffectedModulesWithRuntimeImpact(t *testing.T) {
 	assertContains(t, output, "billing-api")
 	assertContains(t, output, "### Runtime impact")
 	assertContains(t, output, "billing-service")
+}
+
+func TestRenderGovernancePending(t *testing.T) {
+	output := RenderReport(Report{
+		Module: "user-api",
+		Status: "breaking",
+		Governance: &Governance{
+			Status: "pending",
+			Requirements: []GovernanceRequirement{{
+				RequirementType:  "module_owner_approval",
+				TargetModuleName: "user-api",
+				Status:           "pending",
+				Reason:           "Breaking changes require approval from module owner",
+			}},
+		},
+	}, RenderOptions{})
+
+	assertContains(t, output, "### Governance")
+	assertContains(t, output, "Status: ⏳ Approval required")
+	assertContains(t, output, "| Requirement | Target | Status | Reason |")
+	assertContains(t, output, "| Module owner approval | `user-api` | Pending | Breaking changes require approval from module owner |")
+}
+
+func TestRenderGovernanceApproved(t *testing.T) {
+	output := RenderReport(Report{Module: "user-api", Status: "breaking", Governance: &Governance{Status: "approved"}}, RenderOptions{})
+
+	assertContains(t, output, "Status: ✅ Approved")
+}
+
+func TestRenderGovernanceRejected(t *testing.T) {
+	output := RenderReport(Report{Module: "user-api", Status: "breaking", Governance: &Governance{Status: "rejected"}}, RenderOptions{})
+
+	assertContains(t, output, "Status: ❌ Rejected")
+}
+
+func TestRenderGovernanceNotRequired(t *testing.T) {
+	output := RenderReport(Report{Module: "user-api", Status: "passed", Governance: &Governance{Status: "not_required"}}, RenderOptions{})
+
+	assertContains(t, output, "Status: ✅ Approval not required")
+}
+
+func TestRenderGovernanceMissingOwnerWarning(t *testing.T) {
+	output := RenderReport(Report{
+		Module: "user-api",
+		Status: "breaking",
+		Governance: &Governance{
+			Status:               "pending",
+			MissingOwnerWarnings: []string{"Approval required, but no owners are configured for `user-api`."},
+		},
+	}, RenderOptions{})
+
+	assertContains(t, output, "Approval required, but no owners are configured for `user-api`.")
+}
+
+func TestRenderEscapesGovernanceValues(t *testing.T) {
+	output := RenderReport(Report{
+		Module: "user-api",
+		Status: "breaking",
+		Governance: &Governance{
+			Status: "pending",
+			Requirements: []GovernanceRequirement{{
+				RequirementType:  "module_owner_approval",
+				TargetModuleName: "user|api",
+				Status:           "pending",
+				Reason:           "reason | with pipe",
+			}},
+			Decisions: []GovernanceDecision{{
+				Decision:  "approved",
+				DecidedBy: "alice|platform",
+				Comment:   "comment | pipe",
+			}},
+		},
+	}, RenderOptions{})
+
+	assertContains(t, output, `user\|api`)
+	assertContains(t, output, `reason \| with pipe`)
+	assertContains(t, output, `alice\|platform`)
+	assertContains(t, output, `comment \| pipe`)
+}
+
+func TestRenderGovernanceDecisionsUseReturnedDecidedBy(t *testing.T) {
+	output := RenderReport(Report{
+		Module: "user-api",
+		Status: "breaking",
+		Governance: &Governance{
+			Status: "approved",
+			Decisions: []GovernanceDecision{{
+				Decision:  "approved",
+				DecidedBy: "ci-protoradar-token",
+				Comment:   "approved by policy owner",
+			}},
+		},
+	}, RenderOptions{})
+
+	assertContains(t, output, "| Decision | Decided by | Comment |")
+	assertContains(t, output, "| Approved | ci-protoradar-token | approved by policy owner |")
+	assertNotContains(t, output, "| Decision | Actor | Comment |")
+	assertNotContains(t, output, "GitLab user")
+	assertNotContains(t, output, "gitlab")
 }
 
 func TestRenderIncludesHiddenMarker(t *testing.T) {

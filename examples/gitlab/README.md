@@ -31,10 +31,11 @@ Set these in the GitLab project or group CI/CD variables:
 - `PROTORADAR_SERVER_URL`: base URL of the ProtoRadar server.
 - `PROTORADAR_TOKEN`: ProtoRadar API token. Store it as a masked variable; do not commit it.
 - `PROTORADAR_MODULE`: ProtoRadar module name, for example `user-api`.
+- `PROTORADAR_CLI_IMAGE`: container image containing the `protoradar` CLI on `PATH`.
 
 For the MR bot template, also set:
 
-- `PROTORADAR_GITLAB_TOKEN`: GitLab token allowed to create/update merge request notes and set commit statuses. Store it as a masked variable; do not commit it.
+- `PROTORADAR_GITLAB_TOKEN`: GitLab token allowed to create/update merge request notes and set commit statuses. Store it as a masked variable; do not commit it. The CLI also accepts `GITLAB_TOKEN` when `PROTORADAR_GITLAB_TOKEN` is not set.
 
 For the runtime report template, provide either `PROTORADAR_RUNTIME_FILE` or `PROTORADAR_RUNTIME_MODULES`.
 
@@ -49,23 +50,23 @@ For the runtime report template, provide either `PROTORADAR_RUNTIME_FILE` or `PR
 - `PROTORADAR_BUILD_VERSION`: runtime build version. Defaults to `CI_COMMIT_TAG` or `CI_COMMIT_SHORT_SHA`.
 - `PROTORADAR_RUNTIME_FILE`: runtime report file path. Defaults to `protoradar-runtime.yaml`.
 - `PROTORADAR_RUNTIME_MODULES`: space-separated `module@version` values for flag-based runtime reporting.
-- `PROTORADAR_CLI_IMAGE`: container image containing the `protoradar` CLI.
-
 ## CLI Image
 
-The templates use this placeholder image by default:
+The templates use `image: "$PROTORADAR_CLI_IMAGE"`. GitLab resolves the job image before `before_script`, so `PROTORADAR_CLI_IMAGE` is required.
 
-```text
-ghcr.io/alryzden/protoradar-cli:latest
+This repository has a local CLI image target but no registry publishing workflow for an official image:
+
+```sh
+make docker-build-cli CLI_IMAGE=protoradar-cli:local
 ```
 
-ProtoRadar currently has a server Dockerfile, but no official CLI image is defined in this repository yet. Override `PROTORADAR_CLI_IMAGE` with an image built by your organization that contains the `protoradar` binary on `PATH`.
+Use a local image only with runners that can access it. For shared runners, publish your own CLI image and set `PROTORADAR_CLI_IMAGE` to that image.
 
 Example override:
 
 ```yaml
 variables:
-  PROTORADAR_CLI_IMAGE: "registry.example.com/platform/protoradar-cli:latest"
+  PROTORADAR_CLI_IMAGE: "registry.example.com/platform/protoradar-cli:v1.0.0"
 ```
 
 ## Include the MR Bot Template
@@ -87,7 +88,7 @@ variables:
   PROTORADAR_AGAINST: "latest"
 ```
 
-Configure `PROTORADAR_TOKEN` and `PROTORADAR_GITLAB_TOKEN` as masked GitLab CI/CD variables. Do not put token values in `.gitlab-ci.yml`.
+Configure `PROTORADAR_TOKEN` and `PROTORADAR_GITLAB_TOKEN` or `GITLAB_TOKEN` as masked GitLab CI/CD variables. Do not put token values in `.gitlab-ci.yml`.
 
 The MR bot template passes GitLab predefined variables to the CLI:
 
@@ -141,7 +142,7 @@ variables:
   PROTORADAR_MODULE: "user-api"
   PROTORADAR_PROTO_PATH: "."
   PROTORADAR_AGAINST: "latest"
-  PROTORADAR_CLI_IMAGE: "registry.example.com/platform/protoradar-cli:latest"
+  PROTORADAR_CLI_IMAGE: "registry.example.com/platform/protoradar-cli:v1.0.0"
 
 protoradar:breaking-check:
   extends: .protoradar-breaking-check
@@ -167,7 +168,7 @@ variables:
   PROTORADAR_SERVER_URL: "https://protoradar.example.com"
   PROTORADAR_MODULE: "user-api"
   PROTORADAR_PROTO_PATH: "."
-  PROTORADAR_CLI_IMAGE: "registry.example.com/platform/protoradar-cli:latest"
+  PROTORADAR_CLI_IMAGE: "registry.example.com/platform/protoradar-cli:v1.0.0"
 
 protoradar:publish:
   extends: .protoradar-publish
@@ -264,13 +265,13 @@ protoradar module link-gitlab user-api \
 
 The CLI can also read `CI_PROJECT_ID`, `CI_PROJECT_PATH`, and `CI_SERVER_URL` as defaults when those flags are omitted.
 
-Mapping is useful for audit, ownership discovery, self-managed GitLab support, and future GitLab group sync.
+Mapping is useful for audit, ownership discovery, self-managed GitLab support, and future downstream integrations.
 
 ## Token Storage
 
 Store tokens in GitLab CI/CD variables:
 
-- mark `PROTORADAR_TOKEN` and `PROTORADAR_GITLAB_TOKEN` as masked;
+- mark `PROTORADAR_TOKEN` and `PROTORADAR_GITLAB_TOKEN` or `GITLAB_TOKEN` as masked;
 - use protected variables for tokens that can publish versions;
 - be careful with fork merge request pipelines, because untrusted code can run depending on project settings;
 - do not commit tokens;

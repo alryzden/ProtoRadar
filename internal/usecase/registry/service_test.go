@@ -474,6 +474,154 @@ func TestPublishModuleVersionRejectsDuplicateVersion(t *testing.T) {
 	}
 }
 
+func TestDeprecateModuleVersionMarksExistingVersionAndWritesOutbox(t *testing.T) {
+	fixture := newFixture()
+	module := fixture.addModule(t, "billing-api")
+	moduleVersion := fixture.addPublishedVersion(t, module, "v1.0.0", fixture.clock.now.Add(-time.Hour), false)
+	fixture.clock.now = fixture.clock.now.Add(time.Hour)
+
+	response, err := fixture.service.DeprecateModuleVersion(context.Background(), DeprecateModuleVersionInput{
+		ModuleName: "billing-api",
+		Version:    "v1.0.0",
+		Actor:      " maintainer@example.com ",
+		Reason:     " Use v1.1.0 instead. ",
+	})
+	if err != nil {
+		t.Fatalf("deprecate version: %v", err)
+	}
+
+	if response.Version.ID != moduleVersion.ID {
+		t.Fatalf("version id = %q, want %q", response.Version.ID, moduleVersion.ID)
+	}
+	if response.Version.DeprecatedAt == nil || !response.Version.DeprecatedAt.Equal(fixture.clock.now) {
+		t.Fatalf("deprecated at = %#v, want %s", response.Version.DeprecatedAt, fixture.clock.now)
+	}
+	if response.Version.DeprecatedBy != "maintainer@example.com" {
+		t.Fatalf("deprecated by = %q", response.Version.DeprecatedBy)
+	}
+	if response.Version.DeprecationReason != "Use v1.1.0 instead." {
+		t.Fatalf("reason = %q", response.Version.DeprecationReason)
+	}
+	stored, err := fixture.versions.GetByID(context.Background(), moduleVersion.ID)
+	if err != nil {
+		t.Fatalf("load stored version: %v", err)
+	}
+	if !stored.IsDeprecated() || stored.DeprecatedBy != response.Version.DeprecatedBy || stored.DeprecationReason != response.Version.DeprecationReason {
+		t.Fatalf("stored deprecation = %#v", stored)
+	}
+	record := requireOutboxRecord(t, fixture.outbox.records, protoradarevents.EventTypeModuleVersionDeprecated)
+	if record.DedupKey != "module:"+module.ID.String()+":version:v1.0.0:deprecated" {
+		t.Fatalf("dedup key = %q", record.DedupKey)
+	}
+	var payload protoradarevents.ModuleVersionDeprecatedPayload
+	if err := json.Unmarshal(record.Payload, &payload); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	if payload.DeprecatedBy != "maintainer@example.com" || payload.DeprecationReason != "Use v1.1.0 instead." || payload.ModuleVersionID != moduleVersion.ID.String() {
+		t.Fatalf("payload = %#v", payload)
+	}
+}
+
+func TestDeprecateModuleVersionReturnsNotFoundForUnknownModuleOrVersion(t *testing.T) {
+	fixture := newFixture()
+	module := fixture.addModule(t, "billing-api")
+	fixture.addPublishedVersion(t, module, "v1.0.0", fixture.clock.now, false)
+
+	_, err := fixture.service.DeprecateModuleVersion(context.Background(), DeprecateModuleVersionInput{
+		ModuleName: "missing-api",
+		Version:    "v1.0.0",
+		Actor:      "ci",
+	})
+	if !errors.Is(err, ErrModuleNotFound) {
+		t.Fatalf("unknown module error = %v, want ErrModuleNotFound", err)
+	}
+
+	_, err = fixture.service.DeprecateModuleVersion(context.Background(), DeprecateModuleVersionInput{
+		ModuleName: "billing-api",
+		Version:    "v9.9.9",
+		Actor:      "ci",
+	})
+	if !errors.Is(err, ErrModuleNotFound) {
+		t.Fatalf("unknown version error = %v, want ErrModuleNotFound", err)
+	}
+}
+
+func TestDeprecateModuleVersionRejectsInvalidInput(t *testing.T) {
+	fixture := newFixture()
+
+	tests := []struct {
+		name  string
+		input DeprecateModuleVersionInput
+		want  error
+	}{
+		{name: "module", input: DeprecateModuleVersionInput{ModuleName: " ", Version: "v1.0.0", Actor: "ci"}, want: ErrInvalidModuleName},
+		{name: "version", input: DeprecateModuleVersionInput{ModuleName: "billing-api", Version: " ", Actor: "ci"}, want: ErrInvalidVersion},
+		{name: "actor", input: DeprecateModuleVersionInput{ModuleName: "billing-api", Version: "v1.0.0", Actor: " "}, want: ErrInvalidActor},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := fixture.service.DeprecateModuleVersion(context.Background(), tt.input)
+			if !errors.Is(err, tt.want) {
+				t.Fatalf("error = %v, want %v", err, tt.want)
+			}
+		})
+	}
+}
+
+func TestDeprecateModuleVersionIsIdempotentWhenAlreadyDeprecated(t *testing.T) {
+	fixture := newFixture()
+	module := fixture.addModule(t, "billing-api")
+	version := fixture.addPublishedVersion(t, module, "v1.0.0", fixture.clock.now, false)
+	deprecatedAt := fixture.clock.now.Add(-time.Hour)
+	if err := fixture.versions.UpdateDeprecation(context.Background(), version.ID, &deprecatedAt, "first-actor", "first reason"); err != nil {
+		t.Fatalf("seed deprecation: %v", err)
+	}
+
+	response, err := fixture.service.DeprecateModuleVersion(context.Background(), DeprecateModuleVersionInput{
+		ModuleName: "billing-api",
+		Version:    "v1.0.0",
+		Actor:      "second-actor",
+		Reason:     "second reason",
+	})
+	if err != nil {
+		t.Fatalf("deprecate already deprecated: %v", err)
+	}
+	if response.Version.DeprecatedAt == nil || !response.Version.DeprecatedAt.Equal(deprecatedAt) {
+		t.Fatalf("deprecated at = %#v, want existing %s", response.Version.DeprecatedAt, deprecatedAt)
+	}
+	if response.Version.DeprecatedBy != "first-actor" || response.Version.DeprecationReason != "first reason" {
+		t.Fatalf("deprecation was changed: %#v", response.Version)
+	}
+	if len(fixture.outbox.records) != 0 {
+		t.Fatalf("outbox records = %d, want none for idempotent repeat", len(fixture.outbox.records))
+	}
+}
+
+func TestDeprecateModuleVersionRollbackPreventsPartialDeprecationAndOutbox(t *testing.T) {
+	fixture := newFixture()
+	module := fixture.addModule(t, "billing-api")
+	version := fixture.addPublishedVersion(t, module, "v1.0.0", fixture.clock.now, false)
+	fixture.outbox.createErr = errors.New("outbox failed")
+
+	_, err := fixture.service.DeprecateModuleVersion(context.Background(), DeprecateModuleVersionInput{
+		ModuleName: "billing-api",
+		Version:    "v1.0.0",
+		Actor:      "ci",
+		Reason:     "Use v1.1.0 instead.",
+	})
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	stored, err := fixture.versions.GetByID(context.Background(), version.ID)
+	if err != nil {
+		t.Fatalf("load stored version: %v", err)
+	}
+	if stored.IsDeprecated() || len(fixture.outbox.records) != 0 {
+		t.Fatalf("rollback failed: stored=%#v outbox=%#v", stored, fixture.outbox.records)
+	}
+}
+
 func TestPublishModuleVersionRejectsArtifactLargerThanMaxSize(t *testing.T) {
 	fixture := newFixture()
 	fixture.service.options.MaxArtifactSizeBytes = 4
@@ -522,6 +670,80 @@ func TestPublishModuleVersionCleansUpStorageWhenTransactionFailsAfterUpload(t *t
 	}
 	if len(fixture.metadata.byVersion) != 0 {
 		t.Fatalf("descriptor metadata was not rolled back")
+	}
+}
+
+func TestPublishModuleVersionReportsCleanupDeleteFailuresWithoutHidingPrimaryError(t *testing.T) {
+	fixture := newFixture()
+	fixture.addModule(t, "billing-api")
+	primaryErr := errors.New("outbox failed")
+	cleanupErr := errors.New("delete failed")
+	fixture.outbox.createErr = primaryErr
+	fixture.store.deleteErr = cleanupErr
+
+	_, err := fixture.service.PublishModuleVersion(context.Background(), PublishModuleVersionRequest{
+		ModuleName: "billing-api",
+		Version:    "v1.0.0",
+		Artifact:   bytes.NewReader(validSourceArchive(t)),
+	})
+	if !errors.Is(err, primaryErr) {
+		t.Fatalf("error = %v, want primary publish error", err)
+	}
+	if len(fixture.store.putKeys) != 2 {
+		t.Fatalf("put keys = %#v, want 2 uploads", fixture.store.putKeys)
+	}
+	if len(fixture.store.deletedKeys) != 2 {
+		t.Fatalf("deleted keys = %#v, want cleanup attempts for both uploads", fixture.store.deletedKeys)
+	}
+	if len(fixture.cleanupObserver.failures) != 2 {
+		t.Fatalf("cleanup failures = %#v, want 2", fixture.cleanupObserver.failures)
+	}
+	for _, failure := range fixture.cleanupObserver.failures {
+		if failure.StorageKey == "" {
+			t.Fatalf("cleanup failure missing storage key: %#v", failure)
+		}
+		if !errors.Is(failure.Error, cleanupErr) {
+			t.Fatalf("cleanup failure error = %v, want cleanup error", failure.Error)
+		}
+	}
+	if len(fixture.store.objects) != 2 {
+		t.Fatalf("stored objects = %d, want orphan residue to remain observable", len(fixture.store.objects))
+	}
+	if len(fixture.versions.byModuleVersion) != 0 || len(fixture.artifacts.byVersionKind) != 0 {
+		t.Fatalf("publish metadata was committed despite primary failure")
+	}
+}
+
+func TestPublishModuleVersionReportsSourceCleanupFailureWhenBufImageUploadFails(t *testing.T) {
+	fixture := newFixture()
+	fixture.addModule(t, "billing-api")
+	cleanupErr := errors.New("delete failed")
+	fixture.store.putErrOnCall = 2
+	fixture.store.putErr = errors.New("buf image upload failed")
+	fixture.store.deleteErr = cleanupErr
+
+	_, err := fixture.service.PublishModuleVersion(context.Background(), PublishModuleVersionRequest{
+		ModuleName: "billing-api",
+		Version:    "v1.0.0",
+		Artifact:   bytes.NewReader(validSourceArchive(t)),
+	})
+	if !errors.Is(err, ErrStorageFailure) {
+		t.Fatalf("error = %v, want ErrStorageFailure", err)
+	}
+	if len(fixture.store.putKeys) != 2 {
+		t.Fatalf("put keys = %#v, want source and failed buf image attempts", fixture.store.putKeys)
+	}
+	if len(fixture.store.deletedKeys) != 1 {
+		t.Fatalf("deleted keys = %#v, want source cleanup attempt", fixture.store.deletedKeys)
+	}
+	if len(fixture.cleanupObserver.failures) != 1 {
+		t.Fatalf("cleanup failures = %#v, want 1", fixture.cleanupObserver.failures)
+	}
+	if !errors.Is(fixture.cleanupObserver.failures[0].Error, cleanupErr) {
+		t.Fatalf("cleanup failure error = %v, want cleanup error", fixture.cleanupObserver.failures[0].Error)
+	}
+	if len(fixture.versions.byModuleVersion) != 0 || len(fixture.artifacts.byVersionKind) != 0 {
+		t.Fatalf("publish metadata was committed despite storage failure")
 	}
 }
 
@@ -1268,25 +1490,59 @@ func TestAuthenticateTokenAcceptsValidAndRejectsInvalidOrExpiredToken(t *testing
 	}
 }
 
+func TestAuthenticateTokenSucceedsWhenMarkUsedFailsAndReportsFailure(t *testing.T) {
+	fixture := newFixture()
+	fixture.tokenGenerator.next = "raw-token"
+	response, err := fixture.service.CreateAPIToken(context.Background(), CreateAPITokenRequest{Name: "ci"})
+	if err != nil {
+		t.Fatalf("create token: %v", err)
+	}
+	markErr := errors.New("mark used failed")
+	fixture.tokens.markUsedErr = markErr
+
+	subject, err := fixture.service.AuthenticateToken(context.Background(), "raw-token")
+	if err != nil {
+		t.Fatalf("authenticate: %v", err)
+	}
+	if subject.TokenID != response.Token.ID || subject.Name != "ci" {
+		t.Fatalf("subject = %#v", subject)
+	}
+	if len(fixture.tokenUsageObserver.failures) != 1 {
+		t.Fatalf("token usage failures = %#v, want 1", fixture.tokenUsageObserver.failures)
+	}
+	failure := fixture.tokenUsageObserver.failures[0]
+	if failure.TokenID != response.Token.ID.String() {
+		t.Fatalf("token id = %q, want %q", failure.TokenID, response.Token.ID)
+	}
+	if !errors.Is(failure.Error, markErr) {
+		t.Fatalf("failure error = %v, want mark error", failure.Error)
+	}
+	if strings.Contains(failure.TokenID, "raw-token") {
+		t.Fatalf("observer leaked raw token: %#v", failure)
+	}
+}
+
 type fixture struct {
-	service        *Service
-	modules        *fakeModules
-	gitLabProjects *fakeGitLabProjects
-	versions       *fakeVersions
-	artifacts      *fakeArtifacts
-	bufConfigs     *fakeBufConfigs
-	metadata       *fakeMetadata
-	reports        *fakeReports
-	tokens         *fakeTokens
-	dependencies   *fakeDependencyRebuilder
-	transactions   *fakeTransactions
-	outbox         *fakeOutbox
-	store          *fakeArtifactStore
-	bufWorkflow    *fakeBufWorkflow
-	bufBreaking    *fakeBufBreaking
-	clock          *fakeClock
-	ids            *fakeIDs
-	tokenGenerator *fakeTokenGenerator
+	service            *Service
+	modules            *fakeModules
+	gitLabProjects     *fakeGitLabProjects
+	versions           *fakeVersions
+	artifacts          *fakeArtifacts
+	bufConfigs         *fakeBufConfigs
+	metadata           *fakeMetadata
+	reports            *fakeReports
+	tokens             *fakeTokens
+	dependencies       *fakeDependencyRebuilder
+	transactions       *fakeTransactions
+	outbox             *fakeOutbox
+	store              *fakeArtifactStore
+	bufWorkflow        *fakeBufWorkflow
+	bufBreaking        *fakeBufBreaking
+	clock              *fakeClock
+	ids                *fakeIDs
+	tokenGenerator     *fakeTokenGenerator
+	cleanupObserver    *fakeArtifactCleanupObserver
+	tokenUsageObserver *fakeTokenUsageObserver
 }
 
 func newFixture() *fixture {
@@ -1300,6 +1556,8 @@ func newFixture() *fixture {
 	tokens := newFakeTokens()
 	outboxWriter := &fakeOutbox{}
 	store := &fakeArtifactStore{objects: map[string][]byte{}}
+	cleanupObserver := &fakeArtifactCleanupObserver{}
+	tokenUsageObserver := &fakeTokenUsageObserver{}
 	bufWorkflow := &fakeBufWorkflow{result: successfulBufWorkflowResult()}
 	bufBreaking := &fakeBufBreaking{result: BufBreakingCheckResult{Status: domain.BreakingReportStatusPassed, RawOutput: "no breaking changes"}}
 	clock := &fakeClock{now: time.Date(2026, 6, 4, 12, 0, 0, 0, time.UTC)}
@@ -1339,25 +1597,27 @@ func newFixture() *fixture {
 			clock,
 			ids,
 			tokenGenerator,
-			Options{MaxArtifactSizeBytes: 4096, MaxSourceUncompressedSizeBytes: 4096, TokenHashSecret: "hash-secret", BufRequireConfig: true, BufLintMode: BufLintModeWarn, BreakingMaxChanges: 1000, BreakingDefaultAgainst: "latest"},
+			Options{MaxArtifactSizeBytes: 4096, MaxSourceUncompressedSizeBytes: 4096, TokenHashSecret: "hash-secret", BufRequireConfig: true, BufLintMode: BufLintModeWarn, BreakingMaxChanges: 1000, BreakingDefaultAgainst: "latest", ArtifactCleanupObserver: cleanupObserver, TokenUsageObserver: tokenUsageObserver},
 		),
-		modules:        modules,
-		gitLabProjects: gitLabProjects,
-		versions:       versions,
-		artifacts:      artifacts,
-		bufConfigs:     bufConfigs,
-		metadata:       metadata,
-		reports:        reports,
-		tokens:         tokens,
-		dependencies:   dependencies,
-		transactions:   transactions,
-		outbox:         outboxWriter,
-		store:          store,
-		bufWorkflow:    bufWorkflow,
-		bufBreaking:    bufBreaking,
-		clock:          clock,
-		ids:            ids,
-		tokenGenerator: tokenGenerator,
+		modules:            modules,
+		gitLabProjects:     gitLabProjects,
+		versions:           versions,
+		artifacts:          artifacts,
+		bufConfigs:         bufConfigs,
+		metadata:           metadata,
+		reports:            reports,
+		tokens:             tokens,
+		dependencies:       dependencies,
+		transactions:       transactions,
+		outbox:             outboxWriter,
+		store:              store,
+		bufWorkflow:        bufWorkflow,
+		bufBreaking:        bufBreaking,
+		clock:              clock,
+		ids:                ids,
+		tokenGenerator:     tokenGenerator,
+		cleanupObserver:    cleanupObserver,
+		tokenUsageObserver: tokenUsageObserver,
 	}
 }
 
@@ -1679,6 +1939,19 @@ func (repo *fakeVersions) Create(ctx context.Context, version domain.ModuleVersi
 	}
 	repo.byID[version.ID.String()] = version
 	repo.byModuleVersion[key] = version
+	return nil
+}
+
+func (repo *fakeVersions) UpdateDeprecation(ctx context.Context, id domain.ModuleVersionID, deprecatedAt *time.Time, deprecatedBy string, deprecationReason string) error {
+	version, exists := repo.byID[id.String()]
+	if !exists {
+		return domain.ErrNotFound
+	}
+	version.DeprecatedAt = deprecatedAt
+	version.DeprecatedBy = deprecatedBy
+	version.DeprecationReason = deprecationReason
+	repo.byID[id.String()] = version
+	repo.byModuleVersion[moduleVersionKey(version.ModuleID, version.Version)] = version
 	return nil
 }
 
@@ -2162,9 +2435,10 @@ func (repo *fakeReports) restore(snapshot *fakeReports) {
 }
 
 type fakeTokens struct {
-	byID     map[string]domain.APIToken
-	byHash   map[string]domain.APIToken
-	lastUsed map[string]time.Time
+	byID        map[string]domain.APIToken
+	byHash      map[string]domain.APIToken
+	lastUsed    map[string]time.Time
+	markUsedErr error
 }
 
 func newFakeTokens() *fakeTokens {
@@ -2201,6 +2475,9 @@ func (repo *fakeTokens) GetByHash(ctx context.Context, tokenHash string) (domain
 }
 
 func (repo *fakeTokens) MarkUsed(ctx context.Context, id domain.APITokenID, usedAt time.Time) error {
+	if repo.markUsedErr != nil {
+		return repo.markUsedErr
+	}
 	token, exists := repo.byID[id.String()]
 	if !exists {
 		return domain.ErrNotFound
@@ -2210,6 +2487,14 @@ func (repo *fakeTokens) MarkUsed(ctx context.Context, id domain.APITokenID, used
 	repo.byHash[token.TokenHash] = token
 	repo.lastUsed[id.String()] = usedAt
 	return nil
+}
+
+type fakeTokenUsageObserver struct {
+	failures []TokenUsageFailure
+}
+
+func (observer *fakeTokenUsageObserver) RecordTokenUsageFailure(ctx context.Context, failure TokenUsageFailure) {
+	observer.failures = append(observer.failures, failure)
 }
 
 func (repo *fakeTokens) snapshot() *fakeTokens {
@@ -2246,20 +2531,29 @@ func (writer *fakeOutbox) Create(ctx context.Context, record outbox.Record) erro
 }
 
 type fakeArtifactStore struct {
-	objects     map[string][]byte
-	putKey      string
-	deletedKey  string
-	putKeys     []string
-	deletedKeys []string
+	objects      map[string][]byte
+	putKey       string
+	deletedKey   string
+	putKeys      []string
+	deletedKeys  []string
+	putCalls     int
+	putErrOnCall int
+	putErr       error
+	deleteErr    error
 }
 
 func (store *fakeArtifactStore) Put(ctx context.Context, key string, body io.Reader, sizeBytes int64) (storage.ArtifactObject, error) {
+	store.putCalls++
+	store.putKey = key
+	store.putKeys = append(store.putKeys, key)
+	if store.putErrOnCall == store.putCalls && store.putErr != nil {
+		return storage.ArtifactObject{}, store.putErr
+	}
+
 	data, err := io.ReadAll(body)
 	if err != nil {
 		return storage.ArtifactObject{}, err
 	}
-	store.putKey = key
-	store.putKeys = append(store.putKeys, key)
 	store.objects[key] = data
 	return storage.ArtifactObject{
 		Key:         key,
@@ -2284,8 +2578,19 @@ func (store *fakeArtifactStore) Get(ctx context.Context, key string) (storage.Ar
 func (store *fakeArtifactStore) Delete(ctx context.Context, key string) error {
 	store.deletedKey = key
 	store.deletedKeys = append(store.deletedKeys, key)
+	if store.deleteErr != nil {
+		return store.deleteErr
+	}
 	delete(store.objects, key)
 	return nil
+}
+
+type fakeArtifactCleanupObserver struct {
+	failures []ArtifactCleanupFailure
+}
+
+func (observer *fakeArtifactCleanupObserver) RecordArtifactCleanupFailure(ctx context.Context, failure ArtifactCleanupFailure) {
+	observer.failures = append(observer.failures, failure)
 }
 
 type fakeBufWorkflow struct {

@@ -6,12 +6,43 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/alryzden/ProtoRadar/internal/integration/gitlab"
 )
+
+func TestNewClientUsesFiniteDefaultHTTPTimeout(t *testing.T) {
+	client := NewClient("https://gitlab.example.com", "gitlab-token", nil)
+
+	if client.httpClient == nil {
+		t.Fatalf("http client was nil")
+	}
+	if client.httpClient.Timeout <= 0 {
+		t.Fatalf("timeout = %s, want finite positive timeout", client.httpClient.Timeout)
+	}
+}
+
+func TestNewClientPreservesInjectedHTTPClient(t *testing.T) {
+	injected := &http.Client{Timeout: 7 * time.Second}
+
+	client := NewClient("https://gitlab.example.com", "gitlab-token", injected)
+
+	if client.httpClient != injected {
+		t.Fatalf("injected client was not preserved")
+	}
+}
+
+func TestClientConstructorDoesNotAssignHTTPDefaultClient(t *testing.T) {
+	source := readClientSource(t)
+
+	if strings.Contains(source, "http.DefaultClient") {
+		t.Fatalf("client constructor must not assign http.DefaultClient directly")
+	}
+}
 
 func TestGetMergeRequestSendsRequestAndParsesResponse(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -41,6 +72,15 @@ func TestGetMergeRequestSendsRequestAndParsesResponse(t *testing.T) {
 	if mr.WebURL != "https://gitlab.example.com/platform/user-api/-/merge_requests/7" {
 		t.Fatalf("web url = %q", mr.WebURL)
 	}
+}
+
+func readClientSource(t *testing.T) string {
+	t.Helper()
+	body, err := os.ReadFile(filepath.Join(".", "client.go"))
+	if err != nil {
+		t.Fatalf("read client source: %v", err)
+	}
+	return string(body)
 }
 
 func TestListMergeRequestNotesSendsRequestAndParsesNotes(t *testing.T) {

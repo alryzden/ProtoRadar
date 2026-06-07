@@ -121,3 +121,53 @@ func NewRuntimeModuleUsageID(value string) RuntimeModuleUsageID {
 func (id RuntimeModuleUsageID) String() string {
 	return string(id)
 }
+
+type ModuleOwnerID string
+
+func NewModuleOwnerID(value string) ModuleOwnerID {
+	return ModuleOwnerID(strings.TrimSpace(value))
+}
+
+func (id ModuleOwnerID) String() string {
+	return string(id)
+}
+
+type ApprovalRequestID string
+
+func NewApprovalRequestID(value string) ApprovalRequestID {
+	return ApprovalRequestID(strings.TrimSpace(value))
+}
+
+func (id ApprovalRequestID) String() string {
+	return string(id)
+}
+
+type ApprovalRequirementID string
+
+func NewApprovalRequirementID(value string) ApprovalRequirementID {
+	return ApprovalRequirementID(strings.TrimSpace(value))
+}
+
+func (id ApprovalRequirementID) String() string {
+	return string(id)
+}
+
+type ApprovalDecisionID string
+
+func NewApprovalDecisionID(value string) ApprovalDecisionID {
+	return ApprovalDecisionID(strings.TrimSpace(value))
+}
+
+func (id ApprovalDecisionID) String() string {
+	return string(id)
+}
+
+type GovernanceAuditEventID string
+
+func NewGovernanceAuditEventID(value string) GovernanceAuditEventID {
+	return GovernanceAuditEventID(strings.TrimSpace(value))
+}
+
+func (id GovernanceAuditEventID) String() string {
+	return string(id)
+}

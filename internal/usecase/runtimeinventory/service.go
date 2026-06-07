@@ -16,6 +16,7 @@ const (
 	DriftReasonModuleNotFound  = "module_not_found"
 	DriftReasonVersionNotFound = "version_not_found"
 	DriftReasonBehindLatest    = "behind_latest"
+	DriftReasonDeprecated      = "deprecated_version"
 )
 
 type Service struct {
@@ -35,7 +36,7 @@ func NewService(
 	runtime domain.RuntimeInventoryRepository,
 	reports domain.BreakingReportRepository,
 	transactions domain.RegistryTransactionManager,
-	outbox outbox.Writer,
+	outboxWriter outbox.Writer,
 	clock Clock,
 	ids IDGenerator,
 ) *Service {
@@ -45,7 +46,7 @@ func NewService(
 		runtime:      runtime,
 		reports:      reports,
 		transactions: transactions,
-		outbox:       outbox,
+		outbox:       outboxWriter,
 		clock:        clock,
 		ids:          ids,
 	}
@@ -277,6 +278,17 @@ func (svc *Service) resolveRuntimeUsage(ctx context.Context, reference reportedM
 	}
 	if err == nil {
 		usage.LatestVersion = &latest.Version
+	}
+
+	// Drift precedence is intentional:
+	// 1. unknown_version
+	// 2. deprecated_version
+	// 3. behind_latest
+	// 4. up_to_date
+	if moduleVersion.IsDeprecated() {
+		usage.DriftStatus = domain.RuntimeDriftStatusDeprecatedVersion
+		usage.DriftReason = DriftReasonDeprecated
+		return resolvedRuntimeUsage{usage: usage}, nil
 	}
 
 	if latest.ID == moduleVersion.ID || latest.Version == moduleVersion.Version {

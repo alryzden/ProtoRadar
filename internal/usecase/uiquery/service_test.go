@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/alryzden/ProtoRadar/internal/domain"
+	"github.com/alryzden/ProtoRadar/internal/edition"
+	buildversion "github.com/alryzden/ProtoRadar/internal/version"
 )
 
 func TestListModuleOverviewsIncludesLatestVersionAndVersionCount(t *testing.T) {
@@ -31,6 +33,29 @@ func TestListModuleOverviewsIncludesLatestVersionAndVersionCount(t *testing.T) {
 	}
 	if user.LastBreakingStatus != "breaking" {
 		t.Fatalf("last breaking status = %q", user.LastBreakingStatus)
+	}
+}
+
+func TestGetEditionReturnsCommunityCapabilities(t *testing.T) {
+	_, fixture := newFixture()
+	svc := NewService(fixture.modules, fixture.gitlab, fixture.versions, fixture.artifacts, fixture.bufConfigs, fixture.metadata, fixture.reports, fixture.dependencies, nil, GovernanceRepositories{}, edition.NewCommunityCapabilityChecker(), buildversion.BuildInfo{Version: "v1.2.0", Commit: "abc123", BuildDate: "2026-06-05T12:00:00Z"})
+
+	details, err := svc.GetEdition(context.Background(), GetEditionInput{})
+	if err != nil {
+		t.Fatalf("get edition: %v", err)
+	}
+	if details.Edition != edition.NameCommunity || details.Version != "v1.2.0" || details.Commit != "abc123" {
+		t.Fatalf("edition = %#v", details)
+	}
+	statuses := map[string]bool{}
+	for _, status := range details.Capabilities {
+		statuses[status.Name] = status.Enabled
+	}
+	if !statuses[edition.CapabilityRegistry.String()] {
+		t.Fatalf("registry disabled: %#v", statuses)
+	}
+	if statuses[edition.CapabilityOIDCAuth.String()] {
+		t.Fatalf("oidc enabled: %#v", statuses)
 	}
 }
 
@@ -224,10 +249,10 @@ func newFixture() (*Service, *fixture) {
 		UpdatedAt:         at(4),
 	}
 
-	v1 := version(user.ID, "user-v1", "v1.0.0", "digest-v1", at(3))
-	v2 := version(user.ID, "user-v2", "v2.0.0", "digest-v2", at(5))
-	billingV1 := version(billing.ID, "billing-v1", "v1.0.0", "digest-billing-v1", at(4))
-	commonV1 := version(common.ID, "common-v1", "v1.0.0", "digest-common-v1", at(4))
+	v1 := moduleVersion(user.ID, "user-v1", "v1.0.0", "digest-v1", at(3))
+	v2 := moduleVersion(user.ID, "user-v2", "v2.0.0", "digest-v2", at(5))
+	billingV1 := moduleVersion(billing.ID, "billing-v1", "v1.0.0", "digest-billing-v1", at(4))
+	commonV1 := moduleVersion(common.ID, "common-v1", "v1.0.0", "digest-common-v1", at(4))
 	fixture.versions.items = []domain.ModuleVersion{v2, v1, billingV1, commonV1}
 	fixture.artifacts.items[v2.ID] = []domain.Artifact{{ID: domain.NewArtifactID("artifact-v2"), ModuleVersionID: v2.ID, Kind: domain.ArtifactKindBufImage, ChecksumSHA256: "sha-v2", SizeBytes: 42, CreatedAt: at(5)}}
 	fixture.bufConfigs.items[v2.ID] = domain.BufConfigInfo{BufYAMLPresent: true, BufYAMLDigest: "buf-yaml-v2", LintEnabled: true, BreakingConfigPresent: true}
@@ -286,7 +311,7 @@ type fixture struct {
 }
 
 func (fixture *fixture) service() *Service {
-	return NewService(fixture.modules, fixture.gitlab, fixture.versions, fixture.artifacts, fixture.bufConfigs, fixture.metadata, fixture.reports, fixture.dependencies, nil)
+	return NewService(fixture.modules, fixture.gitlab, fixture.versions, fixture.artifacts, fixture.bufConfigs, fixture.metadata, fixture.reports, fixture.dependencies, nil, GovernanceRepositories{}, nil, buildversion.BuildInfo{})
 }
 
 func module(name string, description string, repositoryURL string, updatedAt time.Time) domain.Module {
@@ -297,7 +322,7 @@ func module(name string, description string, repositoryURL string, updatedAt tim
 	return domain.Module{ID: domain.NewModuleID(name + "-id"), Name: moduleName, Description: description, RepositoryURL: repositoryURL, CreatedAt: updatedAt.Add(-time.Hour), UpdatedAt: updatedAt}
 }
 
-func version(moduleID domain.ModuleID, id string, value string, digest string, createdAt time.Time) domain.ModuleVersion {
+func moduleVersion(moduleID domain.ModuleID, id string, value string, digest string, createdAt time.Time) domain.ModuleVersion {
 	parsed, err := domain.NewVersion(value)
 	if err != nil {
 		panic(err)
@@ -347,7 +372,7 @@ type fakeModuleRepo struct {
 }
 
 func (repo *fakeModuleRepo) Create(ctx context.Context, module domain.Module) error {
-	panic("not implemented")
+	panic("fakeModuleRepo.Create was called unexpectedly")
 }
 func (repo *fakeModuleRepo) GetByID(ctx context.Context, id domain.ModuleID) (domain.Module, error) {
 	for _, item := range repo.items {
@@ -376,7 +401,7 @@ type fakeGitLabRepo struct {
 }
 
 func (repo *fakeGitLabRepo) Upsert(ctx context.Context, mapping domain.ModuleGitLabProject) error {
-	panic("not implemented")
+	panic("fakeGitLabRepo.Upsert was called unexpectedly")
 }
 func (repo *fakeGitLabRepo) GetByModuleID(ctx context.Context, moduleID domain.ModuleID) (domain.ModuleGitLabProject, error) {
 	item, ok := repo.items[moduleID]
@@ -386,7 +411,7 @@ func (repo *fakeGitLabRepo) GetByModuleID(ctx context.Context, moduleID domain.M
 	return item, nil
 }
 func (repo *fakeGitLabRepo) GetByGitLabProject(ctx context.Context, gitLabBaseURL string, gitLabProjectID int64) (domain.ModuleGitLabProject, error) {
-	panic("not implemented")
+	panic("fakeGitLabRepo.GetByGitLabProject was called unexpectedly")
 }
 
 type fakeVersionRepo struct {
@@ -394,7 +419,10 @@ type fakeVersionRepo struct {
 }
 
 func (repo *fakeVersionRepo) Create(ctx context.Context, version domain.ModuleVersion) error {
-	panic("not implemented")
+	panic("fakeVersionRepo.Create was called unexpectedly")
+}
+func (repo *fakeVersionRepo) UpdateDeprecation(ctx context.Context, id domain.ModuleVersionID, deprecatedAt *time.Time, deprecatedBy string, deprecationReason string) error {
+	panic("fakeVersionRepo.UpdateDeprecation was called unexpectedly")
 }
 func (repo *fakeVersionRepo) GetByID(ctx context.Context, id domain.ModuleVersionID) (domain.ModuleVersion, error) {
 	for _, item := range repo.items {
@@ -435,13 +463,13 @@ type fakeArtifactRepo struct {
 }
 
 func (repo *fakeArtifactRepo) Create(ctx context.Context, artifact domain.Artifact) error {
-	panic("not implemented")
+	panic("fakeArtifactRepo.Create was called unexpectedly")
 }
 func (repo *fakeArtifactRepo) GetByID(ctx context.Context, id domain.ArtifactID) (domain.Artifact, error) {
-	panic("not implemented")
+	panic("fakeArtifactRepo.GetByID was called unexpectedly")
 }
 func (repo *fakeArtifactRepo) GetByModuleVersionAndKind(ctx context.Context, moduleVersionID domain.ModuleVersionID, kind domain.ArtifactKind) (domain.Artifact, error) {
-	panic("not implemented")
+	panic("fakeArtifactRepo.GetByModuleVersionAndKind was called unexpectedly")
 }
 func (repo *fakeArtifactRepo) ListByModuleVersion(ctx context.Context, moduleVersionID domain.ModuleVersionID) ([]domain.Artifact, error) {
 	return append([]domain.Artifact(nil), repo.items[moduleVersionID]...), nil
@@ -452,7 +480,7 @@ type fakeBufConfigRepo struct {
 }
 
 func (repo *fakeBufConfigRepo) Save(ctx context.Context, moduleVersionID domain.ModuleVersionID, config domain.BufConfigInfo) error {
-	panic("not implemented")
+	panic("fakeBufConfigRepo.Save was called unexpectedly")
 }
 func (repo *fakeBufConfigRepo) GetByModuleVersion(ctx context.Context, moduleVersionID domain.ModuleVersionID) (domain.BufConfigInfo, error) {
 	item, ok := repo.items[moduleVersionID]
@@ -468,7 +496,7 @@ type fakeMetadataRepo struct {
 }
 
 func (repo *fakeMetadataRepo) Save(ctx context.Context, moduleVersionID domain.ModuleVersionID, metadata domain.DescriptorMetadata) error {
-	panic("not implemented")
+	panic("fakeMetadataRepo.Save was called unexpectedly")
 }
 func (repo *fakeMetadataRepo) GetByModuleVersion(ctx context.Context, moduleVersionID domain.ModuleVersionID) (domain.DescriptorMetadata, error) {
 	item, ok := repo.items[moduleVersionID]
@@ -491,7 +519,7 @@ type fakeReportRepo struct {
 }
 
 func (repo *fakeReportRepo) Create(ctx context.Context, report domain.BreakingReport, changes []domain.BreakingChange) error {
-	panic("not implemented")
+	panic("fakeReportRepo.Create was called unexpectedly")
 }
 func (repo *fakeReportRepo) GetByID(ctx context.Context, id domain.BreakingReportID) (domain.BreakingReport, []domain.BreakingChange, error) {
 	for _, reports := range repo.items {
@@ -521,7 +549,7 @@ type fakeDependencyRepo struct {
 }
 
 func (repo *fakeDependencyRepo) ReplaceByConsumerModuleVersion(ctx context.Context, consumerModuleVersionID domain.ModuleVersionID, dependencies []domain.ModuleDependency, unresolved []domain.UnresolvedProtoDependency) error {
-	panic("not implemented")
+	panic("fakeDependencyRepo.ReplaceByConsumerModuleVersion was called unexpectedly")
 }
 func (repo *fakeDependencyRepo) ListUpstreamByModule(ctx context.Context, moduleID domain.ModuleID) ([]domain.ModuleDependency, error) {
 	items := make([]domain.ModuleDependency, 0)
@@ -533,7 +561,7 @@ func (repo *fakeDependencyRepo) ListUpstreamByModule(ctx context.Context, module
 	return items, nil
 }
 func (repo *fakeDependencyRepo) ListUpstreamByModuleVersion(ctx context.Context, moduleVersionID domain.ModuleVersionID) ([]domain.ModuleDependency, error) {
-	panic("not implemented")
+	panic("fakeDependencyRepo.ListUpstreamByModuleVersion was called unexpectedly")
 }
 func (repo *fakeDependencyRepo) ListDownstreamByModule(ctx context.Context, moduleID domain.ModuleID) ([]domain.ModuleDependency, error) {
 	items := make([]domain.ModuleDependency, 0)
@@ -575,7 +603,7 @@ func (repo *fakeDependencyRepo) ListUnresolvedByModule(ctx context.Context, modu
 	return items, nil
 }
 func (repo *fakeDependencyRepo) ListUnresolvedByModuleVersion(ctx context.Context, moduleVersionID domain.ModuleVersionID) ([]domain.UnresolvedProtoDependency, error) {
-	panic("not implemented")
+	panic("fakeDependencyRepo.ListUnresolvedByModuleVersion was called unexpectedly")
 }
 func (repo *fakeDependencyRepo) filteredDownstream(moduleID domain.ModuleID) []domain.ModuleDependency {
 	items := make([]domain.ModuleDependency, 0)

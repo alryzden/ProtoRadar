@@ -1,8 +1,7 @@
 # Reusable ProtoRadar breaking-change check for GitLab merge request pipelines.
-# Override PROTORADAR_CLI_IMAGE until an official ProtoRadar CLI image is published.
+# PROTORADAR_CLI_IMAGE is required and must point to an image with protoradar on PATH.
 
 variables:
-  PROTORADAR_CLI_IMAGE: "ghcr.io/alryzden/protoradar-cli:latest"
   PROTORADAR_PROTO_PATH: "."
   PROTORADAR_AGAINST: "latest"
   PROTORADAR_REPORT_FILE: "protoradar-breaking-report.txt"
@@ -11,7 +10,7 @@ variables:
   image: "$PROTORADAR_CLI_IMAGE"
   rules:
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
-  script:
+  before_script:
     - |
       set -eu
       if [ -z "${PROTORADAR_SERVER_URL:-}" ]; then
@@ -26,6 +25,14 @@ variables:
         echo "PROTORADAR_MODULE is required" >&2
         exit 2
       fi
+      if [ -z "${PROTORADAR_CLI_IMAGE:-}" ]; then
+        echo "PROTORADAR_CLI_IMAGE is required and must contain the protoradar CLI" >&2
+        exit 2
+      fi
+      protoradar version
+  script:
+    - |
+      set -eu
       protoradar check-breaking "${PROTORADAR_MODULE}" \
         --path "${PROTORADAR_PROTO_PATH:-.}" \
         --against "${PROTORADAR_AGAINST:-latest}" \

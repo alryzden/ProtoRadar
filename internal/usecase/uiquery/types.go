@@ -27,6 +27,10 @@ type GetBreakingReportDetailsInput struct {
 	ReportID string
 }
 
+type GetApprovalRequestDetailsInput struct {
+	RequestID string
+}
+
 type GetModuleDependencyGraphInput struct {
 	Module string
 }
@@ -53,6 +57,21 @@ type GetBreakingReportRuntimeImpactInput struct {
 	ReportID string
 }
 
+type GetEditionInput struct{}
+
+type EditionDetails struct {
+	Edition      string
+	Version      string
+	Commit       string
+	BuildDate    string
+	Capabilities []CapabilityStatus
+}
+
+type CapabilityStatus struct {
+	Name    string
+	Enabled bool
+}
+
 type ModuleOverview struct {
 	Module              ModuleInfo
 	GitLabProject       *GitLabProjectInfo
@@ -61,6 +80,7 @@ type ModuleOverview struct {
 	LastPublishedOrSeen time.Time
 	BreakingReportCount int
 	LastBreakingStatus  string
+	Owners              []ModuleOwner
 	Versions            []VersionSummary
 	RecentReports       []BreakingReportSummary
 }
@@ -212,6 +232,7 @@ type BreakingReportDetails struct {
 	Changes         []BreakingChangeSummary
 	AffectedModules []DependencyModule
 	RuntimeImpact   []RuntimeImpact
+	Approval        *ApprovalRequestSummary
 }
 
 type BreakingChangeSummary struct {
@@ -315,4 +336,72 @@ type RuntimeImpact struct {
 	ReportedAt   time.Time
 	ImpactStatus string
 	Reason       string
+	DriftStatus  string
+	DriftReason  string
+}
+
+type ModuleOwner struct {
+	ID          string
+	ModuleID    string
+	ModuleName  string
+	SubjectType string
+	Subject     string
+	Role        string
+	CreatedAt   time.Time
+	UpdatedAt   time.Time
+}
+
+type ApprovalRequestSummary struct {
+	ID                string
+	ModuleID          string
+	ModuleName        string
+	BreakingReportID  string
+	TargetRef         string
+	Status            string
+	RequiredApprovals int
+	ReceivedApprovals int
+	Requirements      []ApprovalRequirementSummary
+	Decisions         []ApprovalDecisionSummary
+	CreatedAt         time.Time
+	UpdatedAt         time.Time
+}
+
+type ApprovalRequirementSummary struct {
+	ID                string
+	ApprovalRequestID string
+	RequirementType   string
+	TargetModuleID    string
+	TargetModuleName  string
+	RequiredRole      string
+	Status            string
+	Reason            string
+	CreatedAt         time.Time
+	UpdatedAt         time.Time
+}
+
+type ApprovalDecisionSummary struct {
+	ID                string
+	ApprovalRequestID string
+	RequirementID     string
+	Decision          string
+	DecidedBy         string
+	Comment           string
+	CreatedAt         time.Time
+}
+
+type ApprovalRequestDetails struct {
+	Request     ApprovalRequestSummary
+	AuditEvents []GovernanceAuditEventSummary
+}
+
+type GovernanceAuditEventSummary struct {
+	ID                string
+	EventType         string
+	Actor             string
+	ModuleID          string
+	ModuleName        string
+	ApprovalRequestID string
+	BreakingReportID  string
+	PayloadJSON       string
+	CreatedAt         time.Time
 }

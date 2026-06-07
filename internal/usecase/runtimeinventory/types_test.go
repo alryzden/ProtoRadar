@@ -1,6 +1,9 @@
 package runtimeinventory
 
-import "testing"
+import (
+	"errors"
+	"testing"
+)
 
 func TestParseModuleVersionReference(t *testing.T) {
 	reference, err := ParseModuleVersionReference("user-api@v1.2.3")
@@ -33,7 +36,7 @@ func TestParseModuleVersionReferenceInvalid(t *testing.T) {
 	}
 
 	for _, value := range invalid {
-		if _, err := ParseModuleVersionReference(value); err != ErrInvalidModuleVersionReference {
+		if _, err := ParseModuleVersionReference(value); !errors.Is(err, ErrInvalidModuleVersionReference) {
 			t.Fatalf("reference %q error = %v, want %v", value, err, ErrInvalidModuleVersionReference)
 		}
 	}

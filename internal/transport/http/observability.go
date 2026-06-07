@@ -14,6 +14,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/alryzden/ProtoRadar/internal/outbox"
 )
 
 const requestIDHeader = "X-Request-ID"
@@ -138,6 +140,15 @@ type Metrics struct {
 	breakingChecksTotal       map[string]uint64
 	breakingCheckDuration     durationMetric
 	runtimeReportsTotal       map[string]uint64
+	artifactStreamErrorsTotal uint64
+	outboxClaimedTotal        uint64
+	outboxDispatchTotal       map[string]uint64
+	outboxDispatchDuration    durationMetric
+	outboxErrorsTotal         map[string]uint64
+	outboxPendingTotal        int64
+	outboxProcessingTotal     int64
+	outboxFailedTotal         int64
+	outboxDeadTotal           int64
 	dependencyEdgesTotal      int64
 	unresolvedDependencyTotal int64
 }
@@ -160,6 +171,8 @@ func NewMetrics() *Metrics {
 		publishTotal:        map[string]uint64{},
 		breakingChecksTotal: map[string]uint64{},
 		runtimeReportsTotal: map[string]uint64{},
+		outboxDispatchTotal: map[string]uint64{},
+		outboxErrorsTotal:   map[string]uint64{},
 	}
 }
 
@@ -204,11 +217,54 @@ func (metrics *Metrics) RecordRuntimeReport(status string) {
 	metrics.runtimeReportsTotal[status]++
 }
 
+func (metrics *Metrics) RecordArtifactStreamError() {
+	metrics.mu.Lock()
+	defer metrics.mu.Unlock()
+	metrics.artifactStreamErrorsTotal++
+}
+
 func (metrics *Metrics) SetDependencyTotals(edges int, unresolved int) {
 	metrics.mu.Lock()
 	defer metrics.mu.Unlock()
 	metrics.dependencyEdgesTotal = int64(edges)
 	metrics.unresolvedDependencyTotal = int64(unresolved)
+}
+
+func (metrics *Metrics) RecordClaimed(count int) {
+	metrics.mu.Lock()
+	defer metrics.mu.Unlock()
+	if count <= 0 {
+		return
+	}
+	// #nosec G115 -- count is checked non-negative and comes from an in-memory batch size.
+	metrics.outboxClaimedTotal += uint64(count)
+}
+
+func (metrics *Metrics) RecordDispatch(status string, duration time.Duration) {
+	metrics.mu.Lock()
+	defer metrics.mu.Unlock()
+	metrics.outboxDispatchTotal[status]++
+	metrics.outboxDispatchDuration.Count++
+	metrics.outboxDispatchDuration.Sum += duration.Seconds()
+}
+
+func (metrics *Metrics) RecordError(status string) {
+	metrics.mu.Lock()
+	defer metrics.mu.Unlock()
+	metrics.outboxErrorsTotal[status]++
+}
+
+func (metrics *Metrics) RecordStats(stats outbox.Stats) {
+	metrics.SetOutboxStats(stats.Pending, stats.Processing, stats.Failed, stats.Dead)
+}
+
+func (metrics *Metrics) SetOutboxStats(pending int, processing int, failed int, dead int) {
+	metrics.mu.Lock()
+	defer metrics.mu.Unlock()
+	metrics.outboxPendingTotal = int64(pending)
+	metrics.outboxProcessingTotal = int64(processing)
+	metrics.outboxFailedTotal = int64(failed)
+	metrics.outboxDeadTotal = int64(dead)
 }
 
 func (metrics *Metrics) WritePrometheus(w http.ResponseWriter) {
@@ -236,6 +292,19 @@ func (metrics *Metrics) WritePrometheus(w http.ResponseWriter) {
 	writeStatusCounters(w, "protoradar_breaking_checks_total", "Total breaking-check requests.", metrics.breakingChecksTotal)
 	writeDuration(w, "protoradar_breaking_check_duration_seconds", "Breaking-check duration in seconds.", metrics.breakingCheckDuration)
 	writeStatusCounters(w, "protoradar_runtime_reports_total", "Total runtime inventory report requests.", metrics.runtimeReportsTotal)
+	fmt.Fprintln(w, "# HELP protoradar_artifact_stream_errors_total Total artifact download stream copy errors after response headers were written.")
+	fmt.Fprintln(w, "# TYPE protoradar_artifact_stream_errors_total counter")
+	fmt.Fprintf(w, "protoradar_artifact_stream_errors_total %d\n", metrics.artifactStreamErrorsTotal)
+	fmt.Fprintln(w, "# HELP protoradar_outbox_claimed_total Total outbox records claimed.")
+	fmt.Fprintln(w, "# TYPE protoradar_outbox_claimed_total counter")
+	fmt.Fprintf(w, "protoradar_outbox_claimed_total %d\n", metrics.outboxClaimedTotal)
+	writeStatusCounters(w, "protoradar_outbox_dispatch_total", "Total outbox dispatch attempts.", metrics.outboxDispatchTotal)
+	writeDuration(w, "protoradar_outbox_dispatch_duration_seconds", "Outbox dispatch duration in seconds.", metrics.outboxDispatchDuration)
+	writeStatusCounters(w, "protoradar_outbox_errors_total", "Total outbox publisher errors.", metrics.outboxErrorsTotal)
+	writeGauge(w, "protoradar_outbox_pending_total", "Current pending outbox records.", metrics.outboxPendingTotal)
+	writeGauge(w, "protoradar_outbox_processing_total", "Current processing outbox records.", metrics.outboxProcessingTotal)
+	writeGauge(w, "protoradar_outbox_failed_total", "Current failed outbox records.", metrics.outboxFailedTotal)
+	writeGauge(w, "protoradar_outbox_dead_total", "Current dead outbox records.", metrics.outboxDeadTotal)
 	fmt.Fprintln(w, "# HELP protoradar_dependency_edges_total Latest observed dependency edge count.")
 	fmt.Fprintln(w, "# TYPE protoradar_dependency_edges_total gauge")
 	fmt.Fprintf(w, "protoradar_dependency_edges_total %d\n", metrics.dependencyEdgesTotal)
@@ -296,6 +365,12 @@ func writeDuration(w io.Writer, name string, help string, value durationMetric) 
 	fmt.Fprintf(w, "# TYPE %s summary\n", name)
 	fmt.Fprintf(w, "%s_sum %g\n", name, value.Sum)
 	fmt.Fprintf(w, "%s_count %d\n", name, value.Count)
+}
+
+func writeGauge(w io.Writer, name string, help string, value int64) {
+	fmt.Fprintf(w, "# HELP %s %s\n", name, help)
+	fmt.Fprintf(w, "# TYPE %s gauge\n", name)
+	fmt.Fprintf(w, "%s %d\n", name, value)
 }
 
 func (server *Server) recordPublishMetric(status string, started time.Time) {

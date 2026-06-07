@@ -12,7 +12,10 @@ import (
 	"github.com/alryzden/ProtoRadar/internal/domain"
 )
 
-const uniqueViolationCode = "23505"
+const (
+	uniqueViolationCode = "23505"
+	checkViolationCode  = "23514"
+)
 
 type queryer interface {
 	Exec(ctx context.Context, sql string, arguments ...any) (pgconn.CommandTag, error)
@@ -72,11 +75,39 @@ func mapError(err error) error {
 	}
 
 	var pgErr *pgconn.PgError
-	if errors.As(err, &pgErr) && pgErr.Code == uniqueViolationCode {
-		return domain.ErrDuplicate
+	if errors.As(err, &pgErr) {
+		switch pgErr.Code {
+		case uniqueViolationCode:
+			return domain.ErrDuplicate
+		case checkViolationCode:
+			if mapped := mapCheckViolation(pgErr.ConstraintName); mapped != nil {
+				return mapped
+			}
+		}
 	}
 
 	return err
+}
+
+func mapCheckViolation(constraintName string) error {
+	switch constraintName {
+	case "module_owners_subject_type_check":
+		return domain.ErrInvalidGovernanceSubjectType
+	case "module_owners_role_check":
+		return domain.ErrInvalidModuleOwnerRole
+	case "approval_requests_status_check":
+		return domain.ErrInvalidApprovalRequestStatus
+	case "approval_requirements_type_check":
+		return domain.ErrInvalidApprovalRequirementType
+	case "approval_requirements_status_check":
+		return domain.ErrInvalidApprovalRequirementStatus
+	case "approval_decisions_decision_check":
+		return domain.ErrInvalidApprovalDecision
+	case "governance_audit_events_type_check":
+		return domain.ErrInvalidGovernanceAuditEventType
+	default:
+		return nil
+	}
 }
 
 func nullableTime(value *time.Time) any {

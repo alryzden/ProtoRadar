@@ -4,6 +4,8 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
+	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -100,6 +102,33 @@ func TestCreateArtifactExcludesIrrelevantDirectories(t *testing.T) {
 	}
 }
 
+func TestCreateArtifactHandlesManyFilesWithoutChangingArchiveContents(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "buf.yaml"), "version: v2\n")
+	for i := 0; i < 200; i++ {
+		writeFile(t, filepath.Join(root, fmt.Sprintf("service_%03d.proto", i)), "syntax = \"proto3\";")
+	}
+
+	artifact, err := createArtifact(root)
+	if err != nil {
+		t.Fatalf("create artifact: %v", err)
+	}
+	if artifact.FileCount != 200 {
+		t.Fatalf("file count = %d, want 200", artifact.FileCount)
+	}
+
+	names := archiveNames(t, artifact.Body)
+	if !slices.Contains(names, "buf.yaml") {
+		t.Fatalf("missing buf.yaml: %#v", names)
+	}
+	for i := 0; i < 200; i++ {
+		name := fmt.Sprintf("service_%03d.proto", i)
+		if !slices.Contains(names, name) {
+			t.Fatalf("missing %s: %#v", name, names)
+		}
+	}
+}
+
 func TestCreateArtifactRejectsSymlink(t *testing.T) {
 	root := t.TempDir()
 	writeFile(t, filepath.Join(root, "buf.yaml"), "version: v2\n")
@@ -111,6 +140,49 @@ func TestCreateArtifactRejectsSymlink(t *testing.T) {
 	_, err := createArtifact(root)
 	if err == nil || !strings.Contains(err.Error(), "symlink") {
 		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestCopyAndCloseClosesReaderWhenCopyFails(t *testing.T) {
+	copyErr := errors.New("copy failed")
+	reader := &errorReadCloser{readErr: copyErr}
+
+	err := copyAndClose(io.Discard, reader)
+	if !errors.Is(err, copyErr) {
+		t.Fatalf("error = %v, want copy error", err)
+	}
+	if !reader.closed {
+		t.Fatal("reader was not closed")
+	}
+}
+
+func TestCopyAndCloseSurfacesCloseError(t *testing.T) {
+	closeErr := errors.New("close failed")
+	reader := &errorReadCloser{body: []byte("artifact"), closeErr: closeErr}
+
+	err := copyAndClose(io.Discard, reader)
+	if !errors.Is(err, closeErr) {
+		t.Fatalf("error = %v, want close error", err)
+	}
+	if !reader.closed {
+		t.Fatal("reader was not closed")
+	}
+}
+
+func TestCopyAndCloseJoinsCopyAndCloseErrors(t *testing.T) {
+	copyErr := errors.New("copy failed")
+	closeErr := errors.New("close failed")
+	reader := &errorReadCloser{readErr: copyErr, closeErr: closeErr}
+
+	err := copyAndClose(io.Discard, reader)
+	if !errors.Is(err, copyErr) {
+		t.Fatalf("error = %v, want copy error", err)
+	}
+	if !errors.Is(err, closeErr) {
+		t.Fatalf("error = %v, want close error", err)
+	}
+	if !reader.closed {
+		t.Fatal("reader was not closed")
 	}
 }
 
@@ -139,6 +211,32 @@ func TestExtractArtifactRefusesNonEmptyOutputWithoutForce(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(output, "user.proto")); err != nil {
 		t.Fatalf("stat extracted file: %v", err)
 	}
+}
+
+type errorReadCloser struct {
+	body     []byte
+	readErr  error
+	closeErr error
+	closed   bool
+}
+
+func (reader *errorReadCloser) Read(p []byte) (int, error) {
+	if reader.readErr != nil {
+		err := reader.readErr
+		reader.readErr = nil
+		return 0, err
+	}
+	if len(reader.body) == 0 {
+		return 0, io.EOF
+	}
+	n := copy(p, reader.body)
+	reader.body = reader.body[n:]
+	return n, nil
+}
+
+func (reader *errorReadCloser) Close() error {
+	reader.closed = true
+	return reader.closeErr
 }
 
 func writeFile(t *testing.T, path string, body string) {

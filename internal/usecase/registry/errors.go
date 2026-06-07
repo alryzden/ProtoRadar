@@ -9,6 +9,7 @@ var (
 	ErrModuleGitLabProjectNotFound = errors.New("module gitlab project mapping not found")
 	ErrModuleAlreadyExists         = errors.New("module already exists")
 	ErrModuleVersionAlreadyExists  = errors.New("module version already exists")
+	ErrInvalidActor                = errors.New("invalid actor")
 	ErrInvalidGitLabBaseURL        = errors.New("invalid gitlab base url")
 	ErrInvalidGitLabProjectID      = errors.New("invalid gitlab project id")
 	ErrInvalidGitLabProjectPath    = errors.New("invalid gitlab project path")

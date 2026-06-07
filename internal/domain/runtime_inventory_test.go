@@ -1,6 +1,9 @@
 package domain
 
-import "testing"
+import (
+	"errors"
+	"testing"
+)
 
 func TestNewRuntimeServiceNameValid(t *testing.T) {
 	valid := []string{
@@ -31,7 +34,7 @@ func TestNewRuntimeServiceNameInvalid(t *testing.T) {
 	}
 
 	for _, value := range invalid {
-		if _, err := NewRuntimeServiceName(value); err != ErrInvalidRuntimeServiceName {
+		if _, err := NewRuntimeServiceName(value); !errors.Is(err, ErrInvalidRuntimeServiceName) {
 			t.Fatalf("runtime service name %q error = %v, want %v", value, err, ErrInvalidRuntimeServiceName)
 		}
 	}
@@ -66,7 +69,7 @@ func TestNewRuntimeEnvironmentInvalid(t *testing.T) {
 	}
 
 	for _, value := range invalid {
-		if _, err := NewRuntimeEnvironment(value); err != ErrInvalidRuntimeEnvironment {
+		if _, err := NewRuntimeEnvironment(value); !errors.Is(err, ErrInvalidRuntimeEnvironment) {
 			t.Fatalf("runtime environment %q error = %v, want %v", value, err, ErrInvalidRuntimeEnvironment)
 		}
 	}
@@ -77,7 +80,7 @@ func TestValidateRuntimeGitCommit(t *testing.T) {
 		t.Fatalf("valid git commit: %v", err)
 	}
 	for _, value := range []string{"", "   ", "abc 123", string(make([]byte, MaxRuntimeGitCommitLength+1))} {
-		if err := ValidateRuntimeGitCommit(value); err != ErrInvalidRuntimeGitCommit {
+		if err := ValidateRuntimeGitCommit(value); !errors.Is(err, ErrInvalidRuntimeGitCommit) {
 			t.Fatalf("git commit %q error = %v, want %v", value, err, ErrInvalidRuntimeGitCommit)
 		}
 	}
@@ -88,7 +91,7 @@ func TestValidateRuntimeBuildVersion(t *testing.T) {
 		t.Fatalf("valid build version: %v", err)
 	}
 	for _, value := range []string{"", "   ", "build\n123", string(make([]byte, MaxRuntimeBuildVersionLength+1))} {
-		if err := ValidateRuntimeBuildVersion(value); err != ErrInvalidRuntimeBuildVersion {
+		if err := ValidateRuntimeBuildVersion(value); !errors.Is(err, ErrInvalidRuntimeBuildVersion) {
 			t.Fatalf("build version %q error = %v, want %v", value, err, ErrInvalidRuntimeBuildVersion)
 		}
 	}
@@ -112,7 +115,7 @@ func TestNewRuntimeDriftStatus(t *testing.T) {
 		}
 	}
 
-	if _, err := NewRuntimeDriftStatus("potentially_affected_by_breaking_change"); err != ErrInvalidRuntimeDriftStatus {
+	if _, err := NewRuntimeDriftStatus("potentially_affected_by_breaking_change"); !errors.Is(err, ErrInvalidRuntimeDriftStatus) {
 		t.Fatalf("breaking impact should not be accepted as drift status: %v", err)
 	}
 }

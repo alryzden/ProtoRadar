@@ -154,7 +154,7 @@ protoradar module link-gitlab user-api \
   --gitlab-base-url "$CI_SERVER_URL"
 ```
 
-This mapping records ownership between a ProtoRadar module and a GitLab project. It supports merge-request bot workflows, audit workflows, self-managed GitLab deployments, and future GitLab group sync.
+This mapping records ownership between a ProtoRadar module and a GitLab project. It supports merge-request bot workflows, audit workflows, self-managed GitLab deployments, and future downstream integrations.
 
 ## Artifact Safety
 

@@ -91,6 +91,49 @@ func TestReportRuntimeInventoryKnownOlderVersionIsBehindLatest(t *testing.T) {
 	}
 }
 
+func TestReportRuntimeInventoryKnownDeprecatedLatestVersionIsDeprecatedVersion(t *testing.T) {
+	fixture := newFixture(t)
+	moduleVersion := fixture.addModuleVersion(t, "user-api", "v1.1.0", "module-1", "version-1", fixture.clock.now)
+	deprecatedAt := fixture.clock.now.Add(time.Minute)
+	if err := fixture.versions.UpdateDeprecation(context.Background(), moduleVersion.ID, &deprecatedAt, "maintainer", "Use v1.2.0 instead."); err != nil {
+		t.Fatalf("deprecate version: %v", err)
+	}
+
+	output, err := fixture.service.ReportRuntimeInventory(context.Background(), validReport([]ReportedModuleInput{{Module: "user-api", Version: "v1.1.0"}}))
+	if err != nil {
+		t.Fatalf("report runtime inventory: %v", err)
+	}
+	usage := output.Usages[0]
+	if usage.DriftStatus != domain.RuntimeDriftStatusDeprecatedVersion || usage.DriftReason != DriftReasonDeprecated || usage.LatestVersion != "v1.1.0" {
+		t.Fatalf("usage = %#v", usage)
+	}
+	if fixture.runtime.usages[0].DriftStatus != domain.RuntimeDriftStatusDeprecatedVersion {
+		t.Fatalf("stored usage = %#v", fixture.runtime.usages[0])
+	}
+}
+
+func TestReportRuntimeInventoryKnownDeprecatedOlderVersionIsDeprecatedVersionNotBehindLatest(t *testing.T) {
+	fixture := newFixture(t)
+	older := fixture.addModuleVersion(t, "user-api", "v1.0.0", "module-1", "version-1", fixture.clock.now.Add(-time.Hour))
+	fixture.addModuleVersion(t, "user-api", "v1.1.0", "module-1", "version-2", fixture.clock.now)
+	deprecatedAt := fixture.clock.now.Add(time.Minute)
+	if err := fixture.versions.UpdateDeprecation(context.Background(), older.ID, &deprecatedAt, "maintainer", "Use v1.1.0 instead."); err != nil {
+		t.Fatalf("deprecate version: %v", err)
+	}
+
+	output, err := fixture.service.ReportRuntimeInventory(context.Background(), validReport([]ReportedModuleInput{{Module: "user-api", Version: "v1.0.0"}}))
+	if err != nil {
+		t.Fatalf("report runtime inventory: %v", err)
+	}
+	usage := output.Usages[0]
+	if usage.DriftStatus != domain.RuntimeDriftStatusDeprecatedVersion || usage.DriftReason != DriftReasonDeprecated || usage.LatestVersion != "v1.1.0" {
+		t.Fatalf("usage = %#v", usage)
+	}
+	if usage.DriftStatus == domain.RuntimeDriftStatusBehindLatest {
+		t.Fatalf("deprecated older version should not be behind_latest: %#v", usage)
+	}
+}
+
 func TestReportRuntimeInventoryUnknownModuleIsUnknownVersion(t *testing.T) {
 	fixture := newFixture(t)
 
@@ -165,6 +208,11 @@ func TestReportRuntimeInventoryDriftCountsReturnedAndIncludedInEvent(t *testing.
 	fixture := newFixture(t)
 	fixture.addModuleVersion(t, "user-api", "v1.0.0", "module-1", "version-1", fixture.clock.now.Add(-time.Hour))
 	fixture.addModuleVersion(t, "user-api", "v1.1.0", "module-1", "version-2", fixture.clock.now)
+	deprecated := fixture.addModuleVersion(t, "orders-api", "v2.0.0", "module-3", "version-3", fixture.clock.now)
+	deprecatedAt := fixture.clock.now.Add(time.Minute)
+	if err := fixture.versions.UpdateDeprecation(context.Background(), deprecated.ID, &deprecatedAt, "maintainer", "Use v2.1.0 instead."); err != nil {
+		t.Fatalf("deprecate version: %v", err)
+	}
 	fixture.addModule(t, "account-api", "module-2")
 
 	output, err := fixture.service.ReportRuntimeInventory(context.Background(), validReport([]ReportedModuleInput{
@@ -172,18 +220,19 @@ func TestReportRuntimeInventoryDriftCountsReturnedAndIncludedInEvent(t *testing.
 		{Module: "user-api", Version: "v1.0.0"},
 		{Module: "missing-api", Version: "v1.0.0"},
 		{Module: "account-api", Version: "v9.9.9"},
+		{Module: "orders-api", Version: "v2.0.0"},
 	}))
 	if err != nil {
 		t.Fatalf("report runtime inventory: %v", err)
 	}
-	if output.DriftCounts.UpToDate != 1 || output.DriftCounts.BehindLatest != 1 || output.DriftCounts.UnknownVersion != 2 {
+	if output.DriftCounts.UpToDate != 1 || output.DriftCounts.BehindLatest != 1 || output.DriftCounts.UnknownVersion != 2 || output.DriftCounts.DeprecatedVersion != 1 {
 		t.Fatalf("drift counts = %#v", output.DriftCounts)
 	}
 	var payload protoradarevents.RuntimeInventoryReportedPayload
 	if err := json.Unmarshal(fixture.outbox.records[0].Payload, &payload); err != nil {
 		t.Fatalf("payload json: %v", err)
 	}
-	if payload.DriftCounts.UpToDate != 1 || payload.DriftCounts.BehindLatest != 1 || payload.DriftCounts.UnknownVersion != 2 || payload.ModuleUsageCount != 4 {
+	if payload.DriftCounts.UpToDate != 1 || payload.DriftCounts.BehindLatest != 1 || payload.DriftCounts.UnknownVersion != 2 || payload.DriftCounts.DeprecatedVersion != 1 || payload.ModuleUsageCount != 5 {
 		t.Fatalf("event payload = %#v", payload)
 	}
 }
@@ -410,6 +459,27 @@ func (repo *fakeModuleVersionRepository) add(version domain.ModuleVersion) {
 
 func (repo *fakeModuleVersionRepository) Create(context.Context, domain.ModuleVersion) error {
 	return nil
+}
+func (repo *fakeModuleVersionRepository) UpdateDeprecation(_ context.Context, id domain.ModuleVersionID, deprecatedAt *time.Time, deprecatedBy string, deprecationReason string) error {
+	for key, version := range repo.byModuleVersion {
+		if version.ID != id {
+			continue
+		}
+		version.DeprecatedAt = deprecatedAt
+		version.DeprecatedBy = deprecatedBy
+		version.DeprecationReason = deprecationReason
+		repo.byModuleVersion[key] = version
+		items := repo.byModule[version.ModuleID.String()]
+		for index, item := range items {
+			if item.ID == id {
+				items[index] = version
+				break
+			}
+		}
+		repo.byModule[version.ModuleID.String()] = items
+		return nil
+	}
+	return domain.ErrNotFound
 }
 func (repo *fakeModuleVersionRepository) GetByID(context.Context, domain.ModuleVersionID) (domain.ModuleVersion, error) {
 	return domain.ModuleVersion{}, domain.ErrNotFound
@@ -704,7 +774,7 @@ func testRuntimeImpact(t *testing.T, serviceNameValue string, environmentValue s
 	environment, _ := domain.NewRuntimeEnvironment(environmentValue)
 	moduleName, _ := domain.NewModuleName(moduleNameValue)
 	version, _ := domain.NewVersion(versionValue)
-	return domain.RuntimeImpact{ServiceName: serviceName, Environment: environment, UsedModule: moduleName, UsedVersion: version, ImpactStatus: domain.RuntimeImpactStatusPotentiallyAffectedByBreakingChange}
+	return domain.RuntimeImpact{ServiceName: serviceName, Environment: environment, UsedModule: moduleName, UsedVersion: version, ImpactStatus: domain.RuntimeImpactStatusPotentiallyAffectedByBreakingChange, DriftStatus: domain.RuntimeDriftStatusDeprecatedVersion, DriftReason: "deprecated_version"}
 }
 
 func testBreakingReport(t *testing.T, reportID string, baseVersionID string) domain.BreakingReport {

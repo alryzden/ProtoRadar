@@ -18,7 +18,7 @@ The full MR bot template also calls the GitLab API from the CLI. GitLab tokens a
 
 Use `examples/gitlab/protoradar-breaking-check.yml` when you only need a pass/fail CI job and a report artifact. This template does not call the GitLab API and does not require `PROTORADAR_GITLAB_TOKEN`.
 
-Use `examples/gitlab/protoradar-mr-check.yml` when you want ProtoRadar to comment directly on the merge request and set a commit status. This template requires `PROTORADAR_GITLAB_TOKEN`.
+Use `examples/gitlab/protoradar-mr-check.yml` when you want ProtoRadar to comment directly on the merge request and set a commit status. This template requires `PROTORADAR_GITLAB_TOKEN` or `GITLAB_TOKEN`.
 
 Use `examples/gitlab/protoradar-publish.yml` to publish module versions from tag pipelines.
 
@@ -31,23 +31,70 @@ Configure these variables in the GitLab project or group CI/CD settings:
 - `PROTORADAR_SERVER_URL`: base URL of the ProtoRadar server, for example `https://protoradar.example.com`.
 - `PROTORADAR_TOKEN`: ProtoRadar API token. Store it as a GitLab CI/CD variable; do not commit it.
 - `PROTORADAR_MODULE`: ProtoRadar module name, for example `user-api`.
+- `PROTORADAR_CLI_IMAGE`: container image containing the `protoradar` CLI on `PATH`.
 
 For the MR bot template, also configure:
 
-- `PROTORADAR_GITLAB_TOKEN`: GitLab API token allowed to comment on merge requests and set commit statuses.
+- `PROTORADAR_GITLAB_TOKEN`: GitLab API token allowed to comment on merge requests and set commit statuses. The CLI also accepts `GITLAB_TOKEN` when `PROTORADAR_GITLAB_TOKEN` is not set.
 
 ## Optional CI Variables
 
 - `PROTORADAR_PROTO_PATH`: path to the Buf workspace. Defaults to `.`.
 - `PROTORADAR_AGAINST`: breaking-check baseline. Defaults to `latest`.
-- `PROTORADAR_CLI_IMAGE`: container image containing the `protoradar` CLI on `PATH`.
 - `PROTORADAR_REPORT_FILE`: report artifact path. Defaults to `protoradar-breaking-report.txt` for the simple check and `protoradar-mr-report.md` for the MR bot.
+- `PROTORADAR_CLI_HTTP_TIMEOUT`: timeout for CLI HTTP calls to ProtoRadar and GitLab. Defaults to `30s` and must be a positive duration.
 - `PROTORADAR_PUBLISH_VERSION`: publish version override. Defaults to `CI_COMMIT_TAG` in tag pipelines.
 - `PROTORADAR_SERVICE`: runtime service name. Defaults to `CI_PROJECT_NAME` in runtime reporting.
 - `PROTORADAR_ENVIRONMENT`: runtime environment. Defaults to `CI_ENVIRONMENT_NAME` in runtime reporting.
 - `PROTORADAR_BUILD_VERSION`: runtime build version. Defaults to `CI_COMMIT_TAG` or `CI_COMMIT_SHORT_SHA`.
 - `PROTORADAR_RUNTIME_FILE`: runtime report file path. Defaults to `protoradar-runtime.yaml`.
 - `PROTORADAR_RUNTIME_MODULES`: space-separated `module@version` values for flag-based runtime reporting.
+
+## CLI Image
+
+All templates use:
+
+```yaml
+image: "$PROTORADAR_CLI_IMAGE"
+```
+
+The image contains the `protoradar` CLI and talks to the ProtoRadar server through the REST API. It does not run the server, PostgreSQL, MinIO, or any GitLab webhook service.
+
+GitLab resolves the job image before `before_script`, so `PROTORADAR_CLI_IMAGE` is required. The templates do not provide a fallback registry image because this repository defines a local CLI image target but does not define a registry publishing workflow for an official image.
+
+Build a local CLI image:
+
+```sh
+make docker-build-cli CLI_IMAGE=protoradar-cli:local
+```
+
+Or build directly:
+
+```sh
+docker build --target cli -t protoradar-cli:local .
+```
+
+Smoke test locally:
+
+```sh
+make docker-smoke-cli CLI_IMAGE=protoradar-cli:local
+docker run --rm protoradar-cli:local version
+```
+
+Then set the CI variable to an image your GitLab runner can pull or already has locally:
+
+```yaml
+variables:
+  PROTORADAR_CLI_IMAGE: "protoradar-cli:local"
+```
+
+For shared runners, build and push this image to your registry, then set `PROTORADAR_CLI_IMAGE`. Example values:
+
+- `protoradar-cli:local` for a local runner that already has the image.
+- `registry.example.com/platform/protoradar-cli:v1.0.0` for a private registry release tag.
+- `registry.example.com/platform/protoradar-cli:abc1234` for an internally published commit image.
+
+A private registry path is only an example, not a ProtoRadar requirement. Do not use a public `ghcr.io/...` image unless your organization has actually published one.
 
 ## Full MR Bot in Merge Requests
 
@@ -70,7 +117,7 @@ variables:
   PROTORADAR_MODULE: "user-api"
   PROTORADAR_PROTO_PATH: "."
   PROTORADAR_AGAINST: "latest"
-  PROTORADAR_CLI_IMAGE: "registry.example.com/platform/protoradar-cli:latest"
+  PROTORADAR_CLI_IMAGE: "registry.example.com/platform/protoradar-cli:v1.0.0"
 ```
 
 The template runs in merge request pipelines and executes `protoradar gitlab mr-check`. It passes GitLab predefined variables including `CI_SERVER_URL`, `CI_PROJECT_ID`, `CI_MERGE_REQUEST_IID`, `CI_COMMIT_SHA`, and `CI_JOB_URL`.
@@ -105,7 +152,7 @@ variables:
   PROTORADAR_MODULE: "user-api"
   PROTORADAR_PROTO_PATH: "."
   PROTORADAR_AGAINST: "latest"
-  PROTORADAR_CLI_IMAGE: "registry.example.com/platform/protoradar-cli:latest"
+  PROTORADAR_CLI_IMAGE: "registry.example.com/platform/protoradar-cli:v1.0.0"
 
 protoradar:breaking-check:
   extends: .protoradar-breaking-check
@@ -143,7 +190,7 @@ variables:
   PROTORADAR_SERVER_URL: "https://protoradar.example.com"
   PROTORADAR_MODULE: "user-api"
   PROTORADAR_PROTO_PATH: "."
-  PROTORADAR_CLI_IMAGE: "registry.example.com/platform/protoradar-cli:latest"
+  PROTORADAR_CLI_IMAGE: "registry.example.com/platform/protoradar-cli:v1.0.0"
 
 protoradar:publish:
   extends: .protoradar-publish
@@ -177,6 +224,11 @@ include:
 stages:
   - deploy
 
+variables:
+  PROTORADAR_SERVER_URL: "https://protoradar.example.com"
+  PROTORADAR_MODULE: "user-api"
+  PROTORADAR_CLI_IMAGE: "registry.example.com/platform/protoradar-cli:v1.0.0"
+
 deploy:production:
   stage: deploy
   environment:
@@ -200,6 +252,9 @@ protoradar:runtime-report:
   extends: .protoradar-runtime-report
   stage: deploy
   variables:
+    PROTORADAR_SERVER_URL: "https://protoradar.example.com"
+    PROTORADAR_MODULE: "billing-api"
+    PROTORADAR_CLI_IMAGE: "registry.example.com/platform/protoradar-cli:v1.0.0"
     PROTORADAR_SERVICE: "billing-service"
     PROTORADAR_ENVIRONMENT: "production"
     PROTORADAR_RUNTIME_MODULES: "user-api@v1.2.0 billing-api@v1.4.0"
@@ -232,13 +287,14 @@ The mapping records which GitLab project owns a ProtoRadar module. The mapping c
 
 Store tokens in GitLab CI/CD variables:
 
-- mark `PROTORADAR_TOKEN` and `PROTORADAR_GITLAB_TOKEN` as masked;
+- mark `PROTORADAR_TOKEN` and `PROTORADAR_GITLAB_TOKEN` or `GITLAB_TOKEN` as masked;
 - use protected variables for tokens that can publish versions;
 - be careful with fork merge request pipelines, because untrusted code can run in CI depending on project settings;
 - do not commit tokens to the repository;
 - do not echo tokens in scripts.
+- do not enable `set -x` around commands that read token environment variables.
 
-ProtoRadar does not implement token scopes or RBAC yet. When scopes are added, use separate least-privilege tokens for read/check and publish workflows.
+ProtoRadar does not implement token scopes or RBAC yet. If scoped tokens or stricter RBAC are added in a future downstream build, use separate least-privilege tokens for read/check and publish workflows.
 
 ## Self-Managed GitLab
 
@@ -254,8 +310,14 @@ Use `CI_SERVER_URL` in GitLab CI when possible so the mapping and MR bot follow 
 `401 unauthorized from ProtoRadar`:
 The `PROTORADAR_TOKEN` value is missing, invalid, expired, or not available to the pipeline. Check masked/protected variable settings and fork pipeline rules.
 
+`PROTORADAR_CLI_IMAGE is required`:
+Set `PROTORADAR_CLI_IMAGE` in project or group CI/CD variables. GitLab resolves the image before the script starts, so a missing image variable can fail before the template's validation messages run.
+
+`image pull failed`:
+The runner cannot pull `PROTORADAR_CLI_IMAGE`. Verify the image tag, registry credentials, runner network access, and whether the image was pushed to the registry. For local runners, verify the image exists on that runner host.
+
 `401 or 403 from GitLab`:
-The `PROTORADAR_GITLAB_TOKEN` value is missing, invalid, expired, unavailable, or lacks API permissions. Check token scope, project membership, and protected variable settings.
+The `PROTORADAR_GITLAB_TOKEN` or `GITLAB_TOKEN` value is missing, invalid, expired, unavailable, or lacks API permissions. Check token scope, project membership, and protected variable settings.
 
 `404 module not found`:
 Create the module first with `protoradar module create <module>` or verify `PROTORADAR_MODULE`.
@@ -271,6 +333,12 @@ The baseline exists but does not have a stored `buf_image` artifact. Publish a n
 
 `protoradar: command not found` or wrong CLI behavior:
 The CI image does not contain the `protoradar` CLI or contains an older binary. Override `PROTORADAR_CLI_IMAGE` with an image that has the expected CLI on `PATH`.
+
+`TLS or certificate error`:
+The CLI cannot validate the ProtoRadar server certificate or GitLab certificate. Use a server URL with the correct hostname, install the required CA certificates in the CLI image, or terminate TLS at a trusted proxy.
+
+`server URL wrong`:
+`PROTORADAR_SERVER_URL` must point to the ProtoRadar server base URL, not GitLab and not the Web UI path. For example, use `https://protoradar.example.com`, not `https://gitlab.example.com` or `https://protoradar.example.com/ui`.
 
 Publish job has no tag/version:
 The publish template runs on tag pipelines. If running it elsewhere, set `PROTORADAR_PUBLISH_VERSION` explicitly.

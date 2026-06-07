@@ -72,21 +72,7 @@ func createArtifact(root string) (ArtifactPackage, error) {
 			return nil
 		}
 
-		file, err := os.Open(path)
-		if err != nil {
-			return err
-		}
-		defer file.Close()
-
-		if err := tarWriter.WriteHeader(&tar.Header{
-			Name:    name,
-			Mode:    0o600,
-			Size:    info.Size(),
-			ModTime: info.ModTime(),
-		}); err != nil {
-			return err
-		}
-		if _, err := io.Copy(tarWriter, file); err != nil {
+		if err := addFileToArchive(tarWriter, path, name, info); err != nil {
 			return err
 		}
 		if filepath.Ext(name) == ".proto" {
@@ -114,6 +100,31 @@ func createArtifact(root string) (ArtifactPackage, error) {
 		SizeBytes:      int64(body.Len()),
 		FileCount:      fileCount,
 	}, nil
+}
+
+func addFileToArchive(tarWriter *tar.Writer, path string, name string, info fs.FileInfo) error {
+	file, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+
+	if err := tarWriter.WriteHeader(&tar.Header{
+		Name:    name,
+		Mode:    0o600,
+		Size:    info.Size(),
+		ModTime: info.ModTime(),
+	}); err != nil {
+		closeErr := file.Close()
+		return errors.Join(err, closeErr)
+	}
+
+	return copyAndClose(tarWriter, file)
+}
+
+func copyAndClose(writer io.Writer, reader io.ReadCloser) error {
+	_, copyErr := io.Copy(writer, reader)
+	closeErr := reader.Close()
+	return errors.Join(copyErr, closeErr)
 }
 
 func requireRegularRootFile(root string, name string) error {
@@ -156,7 +167,7 @@ func extractArtifact(reader io.Reader, outputDir string, force bool) error {
 	if err != nil {
 		return err
 	}
-	defer gzipReader.Close()
+	defer closeGzipReader(gzipReader)
 
 	tarReader := tar.NewReader(gzipReader)
 	for {
@@ -186,6 +197,7 @@ func extractArtifact(reader io.Reader, outputDir string, force bool) error {
 		if err != nil {
 			return err
 		}
+		// #nosec G110 -- pull extracts ProtoRadar source archives from the configured server.
 		_, copyErr := io.Copy(file, tarReader)
 		closeErr := file.Close()
 		if copyErr != nil {
@@ -195,6 +207,11 @@ func extractArtifact(reader io.Reader, outputDir string, force bool) error {
 			return closeErr
 		}
 	}
+}
+
+func closeGzipReader(reader io.Closer) {
+	// Archive extraction reports tar/copy/file close errors; gzip close is cleanup.
+	_ = reader.Close() //nolint:errcheck
 }
 
 func ensureOutputDir(outputDir string, force bool) error {

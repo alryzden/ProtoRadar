@@ -53,7 +53,7 @@ func NewService(
 	dependencies domain.ModuleDependencyRepository,
 	providers registry.DependencyProviderIndexRepository,
 	transactions domain.RegistryTransactionManager,
-	outbox outbox.Writer,
+	outboxWriter outbox.Writer,
 	clock Clock,
 	ids IDGenerator,
 ) *Service {
@@ -64,7 +64,7 @@ func NewService(
 		dependencies: dependencies,
 		providers:    providers,
 		transactions: transactions,
-		outbox:       outbox,
+		outbox:       outboxWriter,
 		clock:        clock,
 		ids:          ids,
 	}

@@ -73,7 +73,7 @@ variables:
   PROTORADAR_MODULE: "user-api"
   PROTORADAR_PROTO_PATH: "."
   PROTORADAR_AGAINST: "latest"
-  PROTORADAR_CLI_IMAGE: "registry.example.com/platform/protoradar-cli:latest"
+  PROTORADAR_CLI_IMAGE: "registry.example.com/platform/protoradar-cli:v1.0.0"
 
 protoradar:breaking-check:
   extends: .protoradar-breaking-check
@@ -257,6 +257,8 @@ PROTORADAR_BREAKING_MAX_REPORT_BYTES=32768
 PROTORADAR_BREAKING_MAX_CHANGES=1000
 PROTORADAR_BREAKING_DEFAULT_AGAINST=latest
 ```
+
+Report size values are numeric bytes only; human-readable sizes such as `32KiB` are not accepted.
 
 Equivalent YAML:
 

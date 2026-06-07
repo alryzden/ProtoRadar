@@ -1,0 +1,44 @@
+{{template "header" .}}
+<section class="hero compact">
+  <div>
+    <p class="eyebrow">Edition</p>
+    <h1>{{.AboutView.DisplayEditionTitle}}</h1>
+    <p>{{.Message}}</p>
+  </div>
+  {{template "status_badge" .}}
+</section>
+<section class="grid two">
+  <article class="card">
+    <h2>Build</h2>
+    <p><strong>Version:</strong> {{.AboutView.Version}}</p>
+    {{if .AboutView.HasCommit}}<p><strong>Commit:</strong> <span class="code-inline">{{.AboutView.Commit}}</span></p>{{end}}
+    {{if .AboutView.HasBuildDate}}<p><strong>Build date:</strong> {{.AboutView.BuildDate}}</p>{{end}}
+  </article>
+  <article class="card">
+    <h2>Edition</h2>
+    <p><strong>Name:</strong> {{.AboutView.Edition}}</p>
+  </article>
+</section>
+<section class="grid two">
+  <article class="card">
+    <h2>Enabled capabilities</h2>
+    {{if .AboutView.HasEnabled}}
+    <ul class="plain-list">
+      {{range .AboutView.Enabled}}<li><span class="badge badge-passed">{{.Name}}</span></li>{{end}}
+    </ul>
+    {{else}}
+    <p class="muted">No enabled capabilities were reported.</p>
+    {{end}}
+  </article>
+  <article class="card">
+    <h2>Unavailable enterprise capabilities</h2>
+    {{if .AboutView.HasUnavailable}}
+    <ul class="plain-list">
+      {{range .AboutView.Unavailable}}<li><span class="badge badge-unknown">{{.Name}}</span></li>{{end}}
+    </ul>
+    {{else}}
+    <p class="muted">No unavailable capabilities were reported.</p>
+    {{end}}
+  </article>
+</section>
+{{template "footer" .}}

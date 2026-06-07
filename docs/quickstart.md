@@ -16,6 +16,8 @@ cp .env.example .env
 docker compose up --build
 ```
 
+`.env.example` uses the current `PROTORADAR_<SECTION>_<FIELD>` server env names. Old pre-koanf names are not compatibility aliases. See [Configuration](configuration.md) for the full loading order, YAML example, duration format, and size format.
+
 In another terminal, check readiness:
 
 ```sh
@@ -44,6 +46,26 @@ This creates:
 - `bin/protoradar-server`
 
 The Docker image also contains both binaries.
+
+## Optional: Build The CLI Image
+
+GitLab CI templates use a CLI container image with `protoradar` on `PATH`. The image calls the ProtoRadar server through the REST API; it does not run the server.
+
+Build and smoke-test a local image:
+
+```sh
+make docker-build-cli CLI_IMAGE=protoradar-cli:local
+make docker-smoke-cli CLI_IMAGE=protoradar-cli:local
+```
+
+Or use Docker directly:
+
+```sh
+docker build --target cli -t protoradar-cli:local .
+docker run --rm protoradar-cli:local version
+```
+
+For GitLab shared runners, push the built image to your registry and set `PROTORADAR_CLI_IMAGE`. This repository does not publish a public CLI image by default.
 
 ## Create A Local API Token
 

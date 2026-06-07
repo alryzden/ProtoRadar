@@ -5,9 +5,41 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
+
+func TestNewClientUsesFiniteDefaultHTTPTimeout(t *testing.T) {
+	client := NewClient("http://localhost:8080", "prr_token", nil)
+
+	if client.httpClient == nil {
+		t.Fatalf("http client was nil")
+	}
+	if client.httpClient.Timeout <= 0 {
+		t.Fatalf("timeout = %s, want finite positive timeout", client.httpClient.Timeout)
+	}
+}
+
+func TestNewClientPreservesInjectedHTTPClient(t *testing.T) {
+	injected := &http.Client{Timeout: 7 * time.Second}
+
+	client := NewClient("http://localhost:8080", "prr_token", injected)
+
+	if client.httpClient != injected {
+		t.Fatalf("injected client was not preserved")
+	}
+}
+
+func TestClientConstructorDoesNotAssignHTTPDefaultClient(t *testing.T) {
+	source := readClientSource(t)
+
+	if strings.Contains(source, "http.DefaultClient") {
+		t.Fatalf("client constructor must not assign http.DefaultClient directly")
+	}
+}
 
 func TestClientSetsAuthorizationHeader(t *testing.T) {
 	var gotAuth string
@@ -25,6 +57,15 @@ func TestClientSetsAuthorizationHeader(t *testing.T) {
 	if gotAuth != "Bearer prr_token" {
 		t.Fatalf("authorization = %q", gotAuth)
 	}
+}
+
+func readClientSource(t *testing.T) string {
+	t.Helper()
+	body, err := os.ReadFile(filepath.Join(".", "client.go"))
+	if err != nil {
+		t.Fatalf("read client source: %v", err)
+	}
+	return string(body)
 }
 
 func TestClientMapsCommonAPIErrors(t *testing.T) {
@@ -102,7 +143,7 @@ func TestClientGetsBreakingReportRuntimeImpact(t *testing.T) {
 			t.Fatalf("method = %s", r.Method)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"report_id":"report-2","impacts":[{"service_name":"billing-service","environment":"production","used_module":"user-api","used_version":"v1.2.0","git_commit":"abc1234","build_version":"2026.06.04-15","impact_status":"potentially_affected_by_breaking_change","reason":"exact version match"}]}`))
+		_, _ = w.Write([]byte(`{"report_id":"report-2","impacts":[{"service_name":"billing-service","environment":"production","used_module":"user-api","used_version":"v1.2.0","git_commit":"abc1234","build_version":"2026.06.04-15","impact_status":"potentially_affected_by_breaking_change","reason":"exact version match","drift_status":"deprecated_version","drift_reason":"deprecated_version"}]}`))
 	}))
 	defer server.Close()
 
@@ -119,5 +160,8 @@ func TestClientGetsBreakingReportRuntimeImpact(t *testing.T) {
 	}
 	if !strings.Contains(impact.Impacts[0].BuildVersion, "2026.06.04") {
 		t.Fatalf("impact row = %#v", impact.Impacts[0])
+	}
+	if impact.Impacts[0].DriftStatus != "deprecated_version" || impact.Impacts[0].DriftReason != "deprecated_version" {
+		t.Fatalf("impact drift = %#v", impact.Impacts[0])
 	}
 }

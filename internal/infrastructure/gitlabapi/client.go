@@ -24,6 +24,8 @@ var (
 	ErrInvalidJSON  = errors.New("gitlab invalid json")
 )
 
+const defaultHTTPTimeout = 30 * time.Second
+
 type Error struct {
 	StatusCode int
 	Status     string
@@ -61,7 +63,7 @@ type Client struct {
 
 func NewClient(baseURL string, token string, httpClient *http.Client) *Client {
 	if httpClient == nil {
-		httpClient = http.DefaultClient
+		httpClient = &http.Client{Timeout: defaultHTTPTimeout}
 	}
 	return &Client{
 		baseURL:    strings.TrimRight(baseURL, "/"),
@@ -163,12 +165,12 @@ func (client *Client) SetCommitStatus(ctx context.Context, projectID int64, sha 
 	if err != nil {
 		return fmt.Errorf("gitlab request failed: %w", err)
 	}
-	defer res.Body.Close()
+	defer closeResponseBody(res.Body)
 	if res.StatusCode < 200 || res.StatusCode >= 300 {
 		return client.responseError(res)
 	}
 	if err := json.NewDecoder(res.Body).Decode(&commitStatusResponse{}); err != nil {
-		return fmt.Errorf("%w: %v", ErrInvalidJSON, err)
+		return fmt.Errorf("%w: %w", ErrInvalidJSON, err)
 	}
 	return nil
 }
@@ -182,13 +184,13 @@ func (client *Client) doJSON(req *http.Request, dst any) error {
 	if err != nil {
 		return fmt.Errorf("gitlab request failed: %w", err)
 	}
-	defer res.Body.Close()
+	defer closeResponseBody(res.Body)
 
 	if res.StatusCode < 200 || res.StatusCode >= 300 {
 		return client.responseError(res)
 	}
 	if err := json.NewDecoder(res.Body).Decode(dst); err != nil {
-		return fmt.Errorf("%w: %v", ErrInvalidJSON, err)
+		return fmt.Errorf("%w: %w", ErrInvalidJSON, err)
 	}
 	return nil
 }
@@ -209,7 +211,7 @@ func (client *Client) newRequest(ctx context.Context, method string, path string
 }
 
 func (client *Client) responseError(res *http.Response) error {
-	body, _ := io.ReadAll(io.LimitReader(res.Body, 1024))
+	body := readLimitedResponseBody(res.Body)
 	text := strings.TrimSpace(string(body))
 	if client.token != "" {
 		text = strings.ReplaceAll(text, client.token, "[redacted]")
@@ -219,6 +221,20 @@ func (client *Client) responseError(res *http.Response) error {
 		Status:     res.Status,
 		Body:       text,
 	}
+}
+
+func closeResponseBody(body io.Closer) {
+	// Client response bodies are read-only cleanup resources here; the GitLab
+	// result is determined by the already-read status/body.
+	_ = body.Close() //nolint:errcheck
+}
+
+func readLimitedResponseBody(reader io.Reader) []byte {
+	body, err := io.ReadAll(io.LimitReader(reader, 1024))
+	if err != nil {
+		return body
+	}
+	return body
 }
 
 type mergeRequestResponse struct {
