@@ -314,14 +314,17 @@ Allowed-path authorization tests may assert validation, conflict, or not-found r
 
 Usecases must not publish to Kafka/Sarama. For state-changing registry operations, write an `outbox.Record` in the same transaction as business state changes.
 
-Root rule files are the source of truth for contributors and agents:
+Development rule files are the source of truth for contributors and automated coding tools:
 
 - `AGENTS.md`
-- `architecture-rules.md`
-- `code-style-rules.md`
-- `config-rules.md`
-- `event-flow-rules.md`
-- `review-checklist.md`
+- `docs/development/architecture.md`
+- `docs/development/go-style.md`
+- `docs/development/configuration.md`
+- `docs/development/event-flow.md`
+- `docs/development/production-safety.md`
+- `docs/development/readability.md`
+- `docs/development/testing.md`
+- `docs/development/review-checklist.md`
 
 ## Known Limitations
 
