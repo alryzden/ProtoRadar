@@ -4,14 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io/fs"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/alryzden/ProtoRadar/internal/domain"
 )
@@ -270,52 +265,6 @@ func TestDescriptorMetadataSaveUsesTransactionRollback(t *testing.T) {
 	if _, err := repo.GetByModuleVersion(ctx, moduleVersionID); !errors.Is(err, domain.ErrNotFound) {
 		t.Fatalf("metadata should not persist after rollback, got %v", err)
 	}
-}
-
-func newTestDB(t *testing.T) *DB {
-	t.Helper()
-	databaseURL := os.Getenv("TEST_DATABASE_URL")
-	if databaseURL == "" {
-		t.Skip("TEST_DATABASE_URL is not set; skipping PostgreSQL integration test")
-	}
-
-	ctx := context.Background()
-	adminPool, err := pgxpool.New(ctx, databaseURL)
-	if err != nil {
-		t.Fatalf("connect admin database: %v", err)
-	}
-	t.Cleanup(adminPool.Close)
-
-	schema := fmt.Sprintf("protoradar_test_%d", time.Now().UnixNano())
-	if _, err := adminPool.Exec(ctx, `CREATE SCHEMA `+quoteIdent(schema)); err != nil {
-		t.Fatalf("create schema: %v", err)
-	}
-	t.Cleanup(func() {
-		_, _ = adminPool.Exec(context.Background(), `DROP SCHEMA IF EXISTS `+quoteIdent(schema)+` CASCADE`)
-	})
-
-	cfg, err := pgxpool.ParseConfig(databaseURL)
-	if err != nil {
-		t.Fatalf("parse database url: %v", err)
-	}
-	if cfg.ConnConfig.RuntimeParams == nil {
-		cfg.ConnConfig.RuntimeParams = map[string]string{}
-	}
-	cfg.ConnConfig.RuntimeParams["search_path"] = schema
-	pool, err := pgxpool.NewWithConfig(ctx, cfg)
-	if err != nil {
-		t.Fatalf("connect test schema: %v", err)
-	}
-	t.Cleanup(pool.Close)
-
-	migrationFS := os.DirFS(filepath.Join("..", "..", "..", "migrations"))
-	if _, err := fs.Stat(migrationFS, "000001_registry.up.sql"); err != nil {
-		t.Fatalf("migration fs: %v", err)
-	}
-	if err := RunMigrations(ctx, pool, migrationFS); err != nil {
-		t.Fatalf("run migrations: %v", err)
-	}
-	return New(pool)
 }
 
 func createTestModuleVersion(t *testing.T, ctx context.Context, db *DB, versionValue string) domain.ModuleVersionID {

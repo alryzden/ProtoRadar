@@ -200,4 +200,6 @@ type RuntimeImpact struct {
 	ReportedAt   time.Time
 	ImpactStatus RuntimeImpactStatus
 	Reason       string
+	DriftStatus  RuntimeDriftStatus
+	DriftReason  string
 }

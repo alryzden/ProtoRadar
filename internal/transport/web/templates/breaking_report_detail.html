@@ -28,6 +28,78 @@
   {{if .HumanSummary}}<pre class="pre-block">{{.HumanSummary}}</pre>{{else}}<p class="muted">No human summary stored for this report.</p>{{end}}
 </section>
 <section class="card">
+  <div class="section-heading">
+    <div><p class="eyebrow">Governance</p><h2>Approval Status</h2></div>
+    {{if .HasApproval}}<a class="button secondary" href="{{.Approval.RequestURL}}">Open approval request</a>{{end}}
+  </div>
+  {{if .HasApproval}}
+  <div class="grid three summary-grid">
+    <article class="card"><h2>Status</h2><p><span class="{{badgeClass .Approval.Status}}">{{badgeText .Approval.Status}}</span></p></article>
+    <article class="card"><h2>Approval Request</h2><p><a class="code-inline" href="{{.Approval.RequestURL}}">{{.Approval.ID}}</a></p></article>
+    <article class="card"><h2>Approvals</h2><p>{{.Approval.ReceivedApprovals}} / {{.Approval.RequiredApprovals}}</p></article>
+  </div>
+  {{if .Approval.HasMissingWarnings}}
+  {{range .Approval.MissingWarnings}}<p class="muted">{{.}}</p>{{end}}
+  {{end}}
+  {{if .Approval.HasRequirements}}
+  <div class="table-wrap embedded">
+    <table>
+      <thead>
+        <tr>
+          <th>Requirement</th>
+          <th>Target</th>
+          <th>Role</th>
+          <th>Status</th>
+          <th>Reason</th>
+        </tr>
+      </thead>
+      <tbody>
+        {{range .Approval.Requirements}}
+        <tr>
+          <td><span class="code-inline">{{.RequirementType}}</span></td>
+          <td>{{if .TargetModuleName}}<a href="{{.TargetModuleURL}}">{{.TargetModuleName}}</a>{{else}}<span class="muted">Unknown</span>{{end}}</td>
+          <td>{{if .RequiredRole}}<span class="code-inline">{{.RequiredRole}}</span>{{else}}<span class="muted">None</span>{{end}}</td>
+          <td><span class="{{badgeClass .Status}}">{{badgeText .Status}}</span></td>
+          <td>{{if .Reason}}{{.Reason}}{{else}}<span class="muted">None</span>{{end}}</td>
+        </tr>
+        {{end}}
+      </tbody>
+    </table>
+  </div>
+  {{else}}
+  <p class="muted">No approval requirements were created for this report.</p>
+  {{end}}
+  {{if .Approval.HasDecisions}}
+  <div class="table-wrap embedded">
+    <table>
+      <thead>
+        <tr>
+          <th>Decision</th>
+          <th>Requirement</th>
+          <th>Actor</th>
+          <th>Comment</th>
+          <th>Created</th>
+        </tr>
+      </thead>
+      <tbody>
+        {{range .Approval.Decisions}}
+        <tr>
+          <td><span class="{{badgeClass .Decision}}">{{badgeText .Decision}}</span></td>
+          <td><span class="code-inline">{{.RequirementID}}</span></td>
+          <td>{{.DecidedBy}}</td>
+          <td>{{if .Comment}}{{.Comment}}{{else}}<span class="muted">None</span>{{end}}</td>
+          <td>{{if .CreatedAt}}{{.CreatedAt}}{{else}}<span class="muted">Unknown</span>{{end}}</td>
+        </tr>
+        {{end}}
+      </tbody>
+    </table>
+  </div>
+  {{end}}
+  {{else}}
+  <p class="muted">No approval request exists for this breaking report.</p>
+  {{end}}
+</section>
+<section class="card">
   <div class="section-heading"><div><p class="eyebrow">Changes</p><h2>Detected Changes</h2></div></div>
   {{if .HasChanges}}
   <div class="table-wrap embedded">
@@ -106,6 +178,8 @@
           <th>Reported</th>
           <th>Impact Status</th>
           <th>Reason</th>
+          <th>Runtime Drift</th>
+          <th>Drift Reason</th>
         </tr>
       </thead>
       <tbody>
@@ -119,6 +193,8 @@
           <td>{{if .ReportedAt}}{{.ReportedAt}}{{else}}<span class="muted">Unknown</span>{{end}}</td>
           <td><span class="{{badgeClass .ImpactStatus}}">{{badgeText .ImpactStatus}}</span></td>
           <td>{{if .Reason}}{{.Reason}}{{else}}<span class="muted">None</span>{{end}}</td>
+          <td>{{if .DriftStatus}}<span class="{{badgeClass .DriftStatus}}">{{badgeText .DriftStatus}}</span>{{else}}<span class="muted">Unknown</span>{{end}}</td>
+          <td>{{if .DriftReason}}{{.DriftReason}}{{else}}<span class="muted">None</span>{{end}}</td>
         </tr>
         {{end}}
       </tbody>

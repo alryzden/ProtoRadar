@@ -12,10 +12,15 @@ import (
 	"strings"
 	"time"
 
+	"github.com/alryzden/ProtoRadar/internal/authorization"
 	"github.com/alryzden/ProtoRadar/internal/domain"
+	"github.com/alryzden/ProtoRadar/internal/edition"
+	"github.com/alryzden/ProtoRadar/internal/identity"
 	"github.com/alryzden/ProtoRadar/internal/storage"
+	"github.com/alryzden/ProtoRadar/internal/usecase/governance"
 	"github.com/alryzden/ProtoRadar/internal/usecase/registry"
 	"github.com/alryzden/ProtoRadar/internal/usecase/runtimeinventory"
+	"github.com/alryzden/ProtoRadar/internal/version"
 )
 
 type Registry interface {
@@ -25,6 +30,7 @@ type Registry interface {
 	LinkModuleGitLabProject(ctx context.Context, input registry.LinkModuleGitLabProjectInput) (registry.LinkModuleGitLabProjectOutput, error)
 	GetModuleGitLabProject(ctx context.Context, moduleName string) (registry.GetModuleGitLabProjectOutput, error)
 	PublishModuleVersion(ctx context.Context, req registry.PublishModuleVersionRequest) (registry.PublishModuleVersionResponse, error)
+	DeprecateModuleVersion(ctx context.Context, input registry.DeprecateModuleVersionInput) (registry.DeprecateModuleVersionOutput, error)
 	ListModuleVersions(ctx context.Context, moduleName string, limit int, offset int) ([]domain.ModuleVersion, error)
 	GetModuleVersion(ctx context.Context, moduleName string, version string) (domain.ModuleVersion, error)
 	GetModuleVersionDetails(ctx context.Context, moduleName string, version string) (registry.ModuleVersionDetailsResponse, error)
@@ -49,9 +55,23 @@ type RuntimeInventory interface {
 	GetBreakingReportRuntimeImpact(ctx context.Context, reportID domain.BreakingReportID, limit int, offset int) ([]domain.RuntimeImpact, error)
 }
 
+type Governance interface {
+	AddModuleOwner(ctx context.Context, input governance.AddModuleOwnerInput) (domain.ModuleOwner, error)
+	RemoveModuleOwner(ctx context.Context, input governance.RemoveModuleOwnerInput) error
+	ListModuleOwners(ctx context.Context, input governance.ListModuleOwnersInput) ([]domain.ModuleOwner, error)
+	governance.ApprovalWorkflow
+	governance.ApprovalAuditReader
+}
+
 type Server struct {
 	registry            Registry
+	auth                identity.AuthProvider
+	authorizer          authorization.Authorizer
+	capabilities        edition.CapabilityChecker
+	buildInfo           version.BuildInfo
 	runtime             RuntimeInventory
+	governance          Governance
+	actorOverridePolicy governance.ActorOverridePolicy
 	bootstrapToken      string
 	readinessChecks     []ReadinessCheck
 	logger              *slog.Logger
@@ -60,13 +80,19 @@ type Server struct {
 }
 
 type Options struct {
-	BootstrapToken      string
-	Runtime             RuntimeInventory
-	Ready               func(context.Context) error
-	ReadinessChecks     []ReadinessCheck
-	Logger              *slog.Logger
-	Metrics             *Metrics
-	MaxRequestBodyBytes int64
+	BootstrapToken                 string
+	AuthProvider                   identity.AuthProvider
+	Authorizer                     authorization.Authorizer
+	CapabilityChecker              edition.CapabilityChecker
+	BuildInfo                      version.BuildInfo
+	Runtime                        RuntimeInventory
+	Governance                     Governance
+	GovernanceActorOverrideEnabled bool
+	Ready                          func(context.Context) error
+	ReadinessChecks                []ReadinessCheck
+	Logger                         *slog.Logger
+	Metrics                        *Metrics
+	MaxRequestBodyBytes            int64
 }
 
 type ReadinessCheck struct {
@@ -74,14 +100,36 @@ type ReadinessCheck struct {
 	Check func(context.Context) error
 }
 
-func NewServer(registry Registry, options Options) *Server {
+func NewServer(registryService Registry, options Options) *Server {
 	readiness := append([]ReadinessCheck{}, options.ReadinessChecks...)
 	if options.Ready != nil {
 		readiness = append(readiness, ReadinessCheck{Name: "database", Check: options.Ready})
 	}
+	authProvider := options.AuthProvider
+	if authProvider == nil && registryService != nil {
+		authProvider = registryAuthProvider{registry: registryService}
+	}
+	authorizer := options.Authorizer
+	if authorizer == nil {
+		authorizer = authorization.CommunityAuthorizer{}
+	}
+	capabilityChecker := options.CapabilityChecker
+	if capabilityChecker == nil {
+		capabilityChecker = edition.NewCommunityCapabilityChecker()
+	}
+	buildInfo := options.BuildInfo
+	if buildInfo.Version == "" {
+		buildInfo = version.Info()
+	}
 	return &Server{
-		registry:            registry,
+		registry:            registryService,
+		auth:                authProvider,
+		authorizer:          authorizer,
+		capabilities:        capabilityChecker,
+		buildInfo:           buildInfo,
 		runtime:             options.Runtime,
+		governance:          options.Governance,
+		actorOverridePolicy: governance.ActorOverridePolicy{Enabled: options.GovernanceActorOverrideEnabled},
 		bootstrapToken:      options.BootstrapToken,
 		readinessChecks:     readiness,
 		logger:              options.Logger,
@@ -95,28 +143,38 @@ func (server *Server) Handler() http.Handler {
 
 	mux.HandleFunc("GET /healthz", server.health)
 	mux.HandleFunc("GET /readyz", server.readiness)
-	mux.Handle("POST /api/v1/modules", server.requireBearer(http.HandlerFunc(server.createModule)))
-	mux.Handle("GET /api/v1/modules", server.requireBearer(http.HandlerFunc(server.listModules)))
-	mux.Handle("GET /api/v1/modules/{module}", server.requireBearer(http.HandlerFunc(server.getModule)))
-	mux.Handle("PUT /api/v1/modules/{module}/gitlab-project", server.requireBearer(http.HandlerFunc(server.linkModuleGitLabProject)))
-	mux.Handle("GET /api/v1/modules/{module}/gitlab-project", server.requireBearer(http.HandlerFunc(server.getModuleGitLabProject)))
-	mux.Handle("GET /api/v1/modules/{module}/dependencies", server.requireBearer(http.HandlerFunc(server.getModuleDependencies)))
-	mux.Handle("GET /api/v1/modules/{module}/affected", server.requireBearer(http.HandlerFunc(server.getAffectedModules)))
-	mux.Handle("GET /api/v1/modules/{module}/runtime-usages", server.requireBearer(http.HandlerFunc(server.getModuleRuntimeUsages)))
-	mux.Handle("POST /api/v1/modules/{module}/versions", server.requireBearer(http.HandlerFunc(server.publishModuleVersion)))
-	mux.Handle("GET /api/v1/modules/{module}/versions", server.requireBearer(http.HandlerFunc(server.listModuleVersions)))
-	mux.Handle("GET /api/v1/modules/{module}/versions/{version}", server.requireBearer(http.HandlerFunc(server.getModuleVersion)))
-	mux.Handle("GET /api/v1/modules/{module}/versions/{version}/metadata", server.requireBearer(http.HandlerFunc(server.getModuleVersionMetadata)))
-	mux.Handle("GET /api/v1/modules/{module}/versions/{version}/artifact", server.requireBearer(http.HandlerFunc(server.downloadArtifact)))
-	mux.Handle("POST /api/v1/modules/{module}/breaking-checks", server.requireBearer(http.HandlerFunc(server.createBreakingCheck)))
-	mux.Handle("GET /api/v1/modules/{module}/breaking-reports", server.requireBearer(http.HandlerFunc(server.listBreakingReports)))
-	mux.Handle("GET /api/v1/breaking-reports/{report_id}", server.requireBearer(http.HandlerFunc(server.getBreakingReport)))
-	mux.Handle("GET /api/v1/breaking-reports/{report_id}/affected-modules", server.requireBearer(http.HandlerFunc(server.getBreakingReportAffectedModules)))
-	mux.Handle("GET /api/v1/breaking-reports/{report_id}/runtime-impact", server.requireBearer(http.HandlerFunc(server.getBreakingReportRuntimeImpact)))
-	mux.Handle("POST /api/v1/runtime/reports", server.requireBearer(http.HandlerFunc(server.reportRuntimeInventory)))
-	mux.Handle("GET /api/v1/runtime/services", server.requireBearer(http.HandlerFunc(server.listRuntimeServices)))
-	mux.Handle("GET /api/v1/runtime/services/{service}", server.requireBearer(http.HandlerFunc(server.getRuntimeServiceDetails)))
-	mux.Handle("GET /api/v1/runtime/environments/{environment}", server.requireBearer(http.HandlerFunc(server.getEnvironmentInventory)))
+	mux.Handle("GET /api/v1/edition", server.protected(authorization.ActionEditionRead, staticResource("edition"), http.HandlerFunc(server.getEdition)))
+	mux.Handle("POST /api/v1/modules", server.protected(authorization.ActionModuleCreate, staticResource("module_collection"), http.HandlerFunc(server.createModule)))
+	mux.Handle("GET /api/v1/modules", server.protected(authorization.ActionModuleRead, staticResource("module_collection"), http.HandlerFunc(server.listModules)))
+	mux.Handle("GET /api/v1/modules/{module}", server.protected(authorization.ActionModuleRead, pathResource("module", "module"), http.HandlerFunc(server.getModule)))
+	mux.Handle("PUT /api/v1/modules/{module}/gitlab-project", server.protected(authorization.ActionGitLabMappingManage, pathResource("module", "module"), http.HandlerFunc(server.linkModuleGitLabProject)))
+	mux.Handle("GET /api/v1/modules/{module}/gitlab-project", server.protected(authorization.ActionGitLabMappingRead, pathResource("module", "module"), http.HandlerFunc(server.getModuleGitLabProject)))
+	mux.Handle("GET /api/v1/modules/{module}/dependencies", server.protected(authorization.ActionDependencyGraphRead, pathResource("module", "module"), http.HandlerFunc(server.getModuleDependencies)))
+	mux.Handle("GET /api/v1/modules/{module}/affected", server.protected(authorization.ActionDependencyGraphRead, pathResource("module", "module"), http.HandlerFunc(server.getAffectedModules)))
+	mux.Handle("GET /api/v1/modules/{module}/owners", server.protected(authorization.ActionGovernanceOwnerRead, pathResource("module", "module"), http.HandlerFunc(server.listModuleOwners)))
+	mux.Handle("POST /api/v1/modules/{module}/owners", server.protected(authorization.ActionGovernanceOwnerManage, pathResource("module", "module"), http.HandlerFunc(server.addModuleOwner)))
+	mux.Handle("DELETE /api/v1/modules/{module}/owners/{owner_id}", server.protected(authorization.ActionGovernanceOwnerManage, pathIDResource("module_owner", "owner_id"), http.HandlerFunc(server.removeModuleOwner)))
+	mux.Handle("GET /api/v1/modules/{module}/runtime-usages", server.protected(authorization.ActionRuntimeInventoryRead, pathResource("module", "module"), http.HandlerFunc(server.getModuleRuntimeUsages)))
+	mux.Handle("POST /api/v1/modules/{module}/versions", server.protected(authorization.ActionModuleVersionPublish, pathResource("module", "module"), http.HandlerFunc(server.publishModuleVersion)))
+	mux.Handle("GET /api/v1/modules/{module}/versions", server.protected(authorization.ActionModuleVersionRead, pathResource("module", "module"), http.HandlerFunc(server.listModuleVersions)))
+	mux.Handle("GET /api/v1/modules/{module}/versions/{version}", server.protected(authorization.ActionModuleVersionRead, moduleVersionResource("module", "version"), http.HandlerFunc(server.getModuleVersion)))
+	mux.Handle("POST /api/v1/modules/{module}/versions/{version}/deprecate", server.protected(authorization.ActionModuleVersionDeprecate, moduleVersionResource("module", "version"), http.HandlerFunc(server.deprecateModuleVersion)))
+	mux.Handle("GET /api/v1/modules/{module}/versions/{version}/metadata", server.protected(authorization.ActionModuleVersionRead, moduleVersionResource("module", "version"), http.HandlerFunc(server.getModuleVersionMetadata)))
+	mux.Handle("GET /api/v1/modules/{module}/versions/{version}/artifact", server.protected(authorization.ActionModuleVersionDownload, moduleVersionResource("module", "version"), http.HandlerFunc(server.downloadArtifact)))
+	mux.Handle("POST /api/v1/modules/{module}/breaking-checks", server.protected(authorization.ActionBreakingCheckRun, pathResource("module", "module"), http.HandlerFunc(server.createBreakingCheck)))
+	mux.Handle("GET /api/v1/modules/{module}/breaking-reports", server.protected(authorization.ActionBreakingReportRead, pathResource("module", "module"), http.HandlerFunc(server.listBreakingReports)))
+	mux.Handle("GET /api/v1/breaking-reports/{report_id}", server.protected(authorization.ActionBreakingReportRead, pathIDResource("breaking_report", "report_id"), http.HandlerFunc(server.getBreakingReport)))
+	mux.Handle("GET /api/v1/breaking-reports/{report_id}/affected-modules", server.protected(authorization.ActionBreakingReportRead, pathIDResource("breaking_report", "report_id"), http.HandlerFunc(server.getBreakingReportAffectedModules)))
+	mux.Handle("GET /api/v1/breaking-reports/{report_id}/runtime-impact", server.protected(authorization.ActionBreakingReportRead, pathIDResource("breaking_report", "report_id"), http.HandlerFunc(server.getBreakingReportRuntimeImpact)))
+	mux.Handle("POST /api/v1/breaking-reports/{report_id}/approval-request", server.protected(authorization.ActionApprovalRequestCreate, pathIDResource("breaking_report", "report_id"), http.HandlerFunc(server.createApprovalRequest)))
+	mux.Handle("GET /api/v1/breaking-reports/{report_id}/approval-status", server.protected(authorization.ActionApprovalRequestRead, pathIDResource("breaking_report", "report_id"), http.HandlerFunc(server.getApprovalStatus)))
+	mux.Handle("POST /api/v1/approval-requests/{request_id}/requirements/{requirement_id}/approve", server.protected(authorization.ActionApprovalDecisionRecord, pathIDResource("approval_request", "request_id"), http.HandlerFunc(server.approveRequirement)))
+	mux.Handle("POST /api/v1/approval-requests/{request_id}/requirements/{requirement_id}/reject", server.protected(authorization.ActionApprovalDecisionRecord, pathIDResource("approval_request", "request_id"), http.HandlerFunc(server.rejectRequirement)))
+	mux.Handle("GET /api/v1/approval-requests/{request_id}/audit", server.protected(authorization.ActionGovernanceAuditRead, pathIDResource("approval_request", "request_id"), http.HandlerFunc(server.getApprovalRequestAudit)))
+	mux.Handle("POST /api/v1/runtime/reports", server.protected(authorization.ActionRuntimeInventoryReport, staticResource("runtime_inventory"), http.HandlerFunc(server.reportRuntimeInventory)))
+	mux.Handle("GET /api/v1/runtime/services", server.protected(authorization.ActionRuntimeInventoryRead, staticResource("runtime_inventory"), http.HandlerFunc(server.listRuntimeServices)))
+	mux.Handle("GET /api/v1/runtime/services/{service}", server.protected(authorization.ActionRuntimeInventoryRead, pathResource("runtime_service", "service"), http.HandlerFunc(server.getRuntimeServiceDetails)))
+	mux.Handle("GET /api/v1/runtime/environments/{environment}", server.protected(authorization.ActionRuntimeInventoryRead, pathResource("runtime_environment", "environment"), http.HandlerFunc(server.getEnvironmentInventory)))
 	mux.Handle("POST /api/v1/tokens", server.requireBootstrapToken(http.HandlerFunc(server.createAPIToken)))
 	mux.HandleFunc("GET /metrics", server.metricsHandler)
 
@@ -150,6 +208,11 @@ func (server *Server) readiness(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, status, readinessResponse{Status: bodyStatus, Checks: checks})
 }
 
+func (server *Server) getEdition(w http.ResponseWriter, r *http.Request) {
+	model := edition.NewCommunityEdition(r.Context(), server.buildInfo, server.capabilities)
+	writeJSON(w, http.StatusOK, editionDTO(model))
+}
+
 func (server *Server) metricsHandler(w http.ResponseWriter, r *http.Request) {
 	if server.metrics == nil {
 		w.Header().Set("Content-Type", prometheusContentType)
@@ -161,17 +224,70 @@ func (server *Server) metricsHandler(w http.ResponseWriter, r *http.Request) {
 
 func (server *Server) requireBearer(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		token, ok := bearerToken(r.Header.Get("Authorization"))
+		if server.auth == nil {
+			writeError(w, http.StatusUnauthorized, "unauthorized", "Authentication is required.")
+			return
+		}
+		principal, err := server.auth.Authenticate(r.Context(), identity.AuthRequest{
+			AuthorizationHeader: r.Header.Get("Authorization"),
+			RequestID:           requestIDFromContext(r.Context()),
+			RemoteAddr:          r.RemoteAddr,
+		})
+		if err != nil {
+			writeError(w, http.StatusUnauthorized, "unauthorized", "Authentication is required.")
+			return
+		}
+		next.ServeHTTP(w, r.WithContext(identity.ContextWithPrincipal(r.Context(), principal)))
+	})
+}
+
+type resourceBuilder func(*http.Request) authorization.Resource
+
+func (server *Server) protected(action authorization.Action, resource resourceBuilder, next http.Handler) http.Handler {
+	return server.requireBearer(server.requireAuthorization(action, resource, next))
+}
+
+func (server *Server) requireAuthorization(action authorization.Action, resource resourceBuilder, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		principal, ok := identity.PrincipalFromContext(r.Context())
 		if !ok {
 			writeError(w, http.StatusUnauthorized, "unauthorized", "Authentication is required.")
 			return
 		}
-		if _, err := server.registry.AuthenticateToken(r.Context(), token); err != nil {
-			writeError(w, http.StatusUnauthorized, "unauthorized", "Authentication is required.")
+		target := authorization.Resource{}
+		if resource != nil {
+			target = resource(r)
+		}
+		if err := server.authorizer.Authorize(r.Context(), principal, action, target); err != nil {
+			writeAuthorizationError(w, err)
 			return
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+func staticResource(resourceType string) resourceBuilder {
+	return func(r *http.Request) authorization.Resource {
+		return authorization.Resource{Type: resourceType}
+	}
+}
+
+func pathResource(resourceType string, pathValue string) resourceBuilder {
+	return func(r *http.Request) authorization.Resource {
+		return authorization.Resource{Type: resourceType, Name: r.PathValue(pathValue)}
+	}
+}
+
+func pathIDResource(resourceType string, pathValue string) resourceBuilder {
+	return func(r *http.Request) authorization.Resource {
+		return authorization.Resource{Type: resourceType, ID: r.PathValue(pathValue)}
+	}
+}
+
+func moduleVersionResource(modulePathValue string, versionPathValue string) resourceBuilder {
+	return func(r *http.Request) authorization.Resource {
+		return authorization.ModuleVersionResource(r.PathValue(modulePathValue), r.PathValue(versionPathValue))
+	}
 }
 
 func (server *Server) requireBootstrapToken(next http.Handler) http.Handler {
@@ -199,6 +315,33 @@ func bearerToken(header string) (string, bool) {
 	}
 	token := strings.TrimSpace(strings.TrimPrefix(header, prefix))
 	return token, token != ""
+}
+
+type registryAuthProvider struct {
+	registry Registry
+}
+
+func (provider registryAuthProvider) Authenticate(ctx context.Context, req identity.AuthRequest) (identity.Principal, error) {
+	token, ok := req.Bearer()
+	if !ok {
+		return identity.Principal{}, registry.ErrInvalidOrExpiredToken
+	}
+	subject, err := provider.registry.AuthenticateToken(ctx, token)
+	if err != nil {
+		return identity.Principal{}, err
+	}
+	principalSubject := strings.TrimSpace(subject.Name)
+	if principalSubject == "" {
+		principalSubject = subject.TokenID.String()
+	}
+	return identity.Principal{
+		Subject:     principalSubject,
+		DisplayName: principalSubject,
+		Type:        identity.PrincipalTypeAPIToken,
+		Metadata: map[string]string{
+			"api_token_id": subject.TokenID.String(),
+		},
+	}, nil
 }
 
 func (server *Server) createModule(w http.ResponseWriter, r *http.Request) {
@@ -297,6 +440,7 @@ func (server *Server) getAffectedModules(w http.ResponseWriter, r *http.Request)
 func (server *Server) publishModuleVersion(w http.ResponseWriter, r *http.Request) {
 	started := time.Now()
 	server.limitRequestBody(w, r)
+	// #nosec G120 -- limitRequestBody wraps r.Body with http.MaxBytesReader before multipart parsing.
 	if err := r.ParseMultipartForm(32 << 20); err != nil {
 		server.recordPublishMetric("error", started)
 		if isRequestBodyTooLarge(err) {
@@ -307,18 +451,18 @@ func (server *Server) publishModuleVersion(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	version := strings.TrimSpace(r.FormValue("version"))
+	versionValue := strings.TrimSpace(r.FormValue("version"))
 	file, _, err := r.FormFile("artifact")
 	if err != nil {
 		server.recordPublishMetric("error", started)
 		writeError(w, http.StatusBadRequest, "bad_request", "Artifact file is required.")
 		return
 	}
-	defer file.Close()
+	defer closeReadCloser(file)
 
 	response, err := server.registry.PublishModuleVersion(r.Context(), registry.PublishModuleVersionRequest{
 		ModuleName: r.PathValue("module"),
-		Version:    version,
+		Version:    versionValue,
 		Artifact:   file,
 	})
 	if err != nil {
@@ -363,6 +507,37 @@ func (server *Server) getModuleVersion(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, moduleVersionDetailsResponse(r.PathValue("module"), details))
 }
 
+func (server *Server) deprecateModuleVersion(w http.ResponseWriter, r *http.Request) {
+	server.limitRequestBody(w, r)
+	var req deprecateModuleVersionRequest
+	if r.Body != nil && r.ContentLength != 0 {
+		if err := decodeJSON(r, &req); err != nil {
+			if isRequestBodyTooLarge(err) {
+				writePayloadTooLarge(w)
+				return
+			}
+			writeError(w, http.StatusBadRequest, "bad_request", "Request body is invalid.")
+			return
+		}
+	}
+	principal, ok := identity.PrincipalFromContext(r.Context())
+	if !ok || strings.TrimSpace(principal.Subject) == "" {
+		writeUsecaseError(w, registry.ErrInvalidActor)
+		return
+	}
+	response, err := server.registry.DeprecateModuleVersion(r.Context(), registry.DeprecateModuleVersionInput{
+		ModuleName: r.PathValue("module"),
+		Version:    r.PathValue("version"),
+		Actor:      principal.Subject,
+		Reason:     req.Reason,
+	})
+	if err != nil {
+		writeUsecaseError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, moduleVersionResponse(response.Version))
+}
+
 func (server *Server) getModuleVersionMetadata(w http.ResponseWriter, r *http.Request) {
 	metadata, err := server.registry.GetModuleVersionMetadata(r.Context(), r.PathValue("module"), r.PathValue("version"))
 	if err != nil {
@@ -375,6 +550,7 @@ func (server *Server) getModuleVersionMetadata(w http.ResponseWriter, r *http.Re
 func (server *Server) createBreakingCheck(w http.ResponseWriter, r *http.Request) {
 	started := time.Now()
 	server.limitRequestBody(w, r)
+	// #nosec G120 -- limitRequestBody wraps r.Body with http.MaxBytesReader before multipart parsing.
 	if err := r.ParseMultipartForm(32 << 20); err != nil {
 		server.recordBreakingCheckMetric("error", started)
 		if isRequestBodyTooLarge(err) {
@@ -391,7 +567,7 @@ func (server *Server) createBreakingCheck(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusBadRequest, "bad_request", "Artifact file is required.")
 		return
 	}
-	defer file.Close()
+	defer closeReadCloser(file)
 
 	var sizeBytes int64
 	var archiveName string
@@ -557,7 +733,7 @@ func (server *Server) downloadArtifact(w http.ResponseWriter, r *http.Request) {
 	moduleName := r.PathValue("module")
 	versionValue := r.PathValue("version")
 
-	version, err := server.registry.GetModuleVersion(r.Context(), moduleName, versionValue)
+	moduleVersion, err := server.registry.GetModuleVersion(r.Context(), moduleName, versionValue)
 	if err != nil {
 		writeUsecaseError(w, err)
 		return
@@ -567,7 +743,7 @@ func (server *Server) downloadArtifact(w http.ResponseWriter, r *http.Request) {
 		writeUsecaseError(w, err)
 		return
 	}
-	defer object.Body.Close()
+	defer closeReadCloser(object.Body)
 
 	contentType := object.ContentType
 	if contentType == "" {
@@ -575,12 +751,28 @@ func (server *Server) downloadArtifact(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", contentType)
 	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s-%s.tar.gz"`, moduleName, versionValue))
-	w.Header().Set("X-ProtoRadar-Digest", version.Digest)
+	w.Header().Set("X-ProtoRadar-Digest", moduleVersion.Digest)
 	if artifact.ChecksumSHA256 != "" {
 		w.Header().Set("X-ProtoRadar-Checksum-SHA256", artifact.ChecksumSHA256)
 	}
 	w.WriteHeader(http.StatusOK)
-	_, _ = io.Copy(w, object.Body)
+	bytesCopied, copyErr := io.Copy(w, object.Body)
+	if copyErr != nil {
+		if server.metrics != nil {
+			server.metrics.RecordArtifactStreamError()
+		}
+		if server.logger != nil {
+			server.logger.ErrorContext(r.Context(), "artifact_download_stream_error",
+				slog.String("module", moduleName),
+				slog.String("version", versionValue),
+				slog.String("artifact_kind", artifact.Kind.String()),
+				slog.Int64("artifact_size_bytes", artifact.SizeBytes),
+				slog.Int64("bytes_copied", bytesCopied),
+				slog.String("error_type", fmt.Sprintf("%T", copyErr)),
+				slog.String("request_id", requestIDFromContext(r.Context())),
+			)
+		}
+	}
 }
 
 func (server *Server) createAPIToken(w http.ResponseWriter, r *http.Request) {
@@ -649,14 +841,16 @@ func parsePositiveInt(value string, fallback int) int {
 
 func writeUsecaseError(w http.ResponseWriter, err error) {
 	switch {
-	case errors.Is(err, registry.ErrInvalidModuleName), errors.Is(err, registry.ErrInvalidVersion), errors.Is(err, registry.ErrInvalidAgainst), errors.Is(err, registry.ErrInvalidTargetRef), errors.Is(err, registry.ErrArtifactRequired), errors.Is(err, registry.ErrInvalidGitLabBaseURL), errors.Is(err, registry.ErrInvalidGitLabProjectID), errors.Is(err, registry.ErrInvalidGitLabProjectPath), errors.Is(err, runtimeinventory.ErrRuntimeModulesRequired), errors.Is(err, domain.ErrInvalidRuntimeServiceName), errors.Is(err, domain.ErrInvalidRuntimeEnvironment), errors.Is(err, domain.ErrInvalidRuntimeGitCommit), errors.Is(err, domain.ErrInvalidRuntimeBuildVersion), errors.Is(err, domain.ErrInvalidModuleName), errors.Is(err, domain.ErrInvalidVersion):
+	case errors.Is(err, registry.ErrInvalidModuleName), errors.Is(err, registry.ErrInvalidVersion), errors.Is(err, registry.ErrInvalidActor), errors.Is(err, registry.ErrInvalidAgainst), errors.Is(err, registry.ErrInvalidTargetRef), errors.Is(err, registry.ErrArtifactRequired), errors.Is(err, registry.ErrInvalidGitLabBaseURL), errors.Is(err, registry.ErrInvalidGitLabProjectID), errors.Is(err, registry.ErrInvalidGitLabProjectPath), errors.Is(err, runtimeinventory.ErrRuntimeModulesRequired), errors.Is(err, domain.ErrInvalidRuntimeServiceName), errors.Is(err, domain.ErrInvalidRuntimeEnvironment), errors.Is(err, domain.ErrInvalidRuntimeGitCommit), errors.Is(err, domain.ErrInvalidRuntimeBuildVersion), errors.Is(err, domain.ErrInvalidModuleName), errors.Is(err, domain.ErrInvalidVersion), errors.Is(err, domain.ErrInvalidGovernanceSubjectType), errors.Is(err, domain.ErrInvalidModuleOwnerRole), errors.Is(err, domain.ErrInvalidApprovalRequestStatus), errors.Is(err, domain.ErrInvalidApprovalRequirementType), errors.Is(err, domain.ErrInvalidApprovalRequirementStatus), errors.Is(err, domain.ErrInvalidApprovalDecision), errors.Is(err, domain.ErrInvalidGovernanceAuditEventType), errors.Is(err, governance.ErrInvalidModuleName), errors.Is(err, governance.ErrInvalidSubjectType), errors.Is(err, governance.ErrInvalidSubject), errors.Is(err, governance.ErrInvalidModuleOwnerRole), errors.Is(err, governance.ErrInvalidModuleOwnerID), errors.Is(err, governance.ErrInvalidBreakingReportID), errors.Is(err, governance.ErrInvalidRequirementID), errors.Is(err, governance.ErrInvalidApprovalActor), errors.Is(err, governance.ErrApprovalDecisionCommentTooLong):
 		writeError(w, http.StatusBadRequest, "validation_error", "Request validation failed.")
 	case errors.Is(err, registry.ErrInvalidOrExpiredToken):
 		writeError(w, http.StatusUnauthorized, "unauthorized", "Authentication is required.")
-	case errors.Is(err, registry.ErrModuleNotFound), errors.Is(err, registry.ErrBaselineVersionNotFound), errors.Is(err, registry.ErrBreakingReportNotFound), errors.Is(err, registry.ErrModuleGitLabProjectNotFound), errors.Is(err, domain.ErrNotFound):
+	case errors.Is(err, registry.ErrModuleNotFound), errors.Is(err, registry.ErrBaselineVersionNotFound), errors.Is(err, registry.ErrBreakingReportNotFound), errors.Is(err, registry.ErrModuleGitLabProjectNotFound), errors.Is(err, domain.ErrNotFound), errors.Is(err, governance.ErrModuleNotFound), errors.Is(err, governance.ErrModuleOwnerNotFound), errors.Is(err, governance.ErrBreakingReportNotFound), errors.Is(err, governance.ErrApprovalRequestNotFound), errors.Is(err, governance.ErrApprovalRequirementNotFound):
 		writeError(w, http.StatusNotFound, "not_found", "Requested resource was not found.")
-	case errors.Is(err, registry.ErrModuleAlreadyExists), errors.Is(err, registry.ErrModuleVersionAlreadyExists), errors.Is(err, registry.ErrGitLabProjectAlreadyLinked):
+	case errors.Is(err, registry.ErrModuleAlreadyExists), errors.Is(err, registry.ErrModuleVersionAlreadyExists), errors.Is(err, registry.ErrGitLabProjectAlreadyLinked), errors.Is(err, governance.ErrModuleOwnerAlreadyExists), errors.Is(err, governance.ErrApprovalRequestConflict), errors.Is(err, governance.ErrApprovalRequirementConflict):
 		writeError(w, http.StatusConflict, "conflict", "Requested operation conflicts with existing state.")
+	case errors.Is(err, governance.ErrApprovalActorForbidden), errors.Is(err, governance.ErrGovernanceActorOverrideForbidden):
+		writeError(w, http.StatusForbidden, "forbidden", "Governance actor is not allowed.")
 	case errors.Is(err, registry.ErrBaselineBufImageMissing):
 		writeError(w, http.StatusConflict, "conflict", "Baseline Buf image is missing.")
 	case errors.Is(err, registry.ErrArtifactTooLarge):
@@ -678,6 +872,15 @@ func writeUsecaseError(w http.ResponseWriter, err error) {
 	}
 }
 
+func writeAuthorizationError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, authorization.ErrUnauthenticated):
+		writeError(w, http.StatusUnauthorized, "unauthorized", "Authentication is required.")
+	default:
+		writeError(w, http.StatusForbidden, "forbidden", "Principal is not allowed to perform this action.")
+	}
+}
+
 func writeInternalError(w http.ResponseWriter) {
 	writeError(w, http.StatusInternalServerError, "internal_error", "Internal server error.")
 }
@@ -693,5 +896,13 @@ func writeError(w http.ResponseWriter, status int, code string, message string) 
 func writeJSON(w http.ResponseWriter, status int, body any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(body)
+	if err := json.NewEncoder(w).Encode(body); err != nil {
+		return
+	}
+}
+
+func closeReadCloser(body io.Closer) {
+	// Close failures here are cleanup-only; request handlers already returned
+	// their primary response or stream error.
+	_ = body.Close() //nolint:errcheck
 }

@@ -2,9 +2,12 @@
 .idea
 .vscode
 .env
+.env.*
+!.env.example
 bin
 coverage.*
 *.coverprofile
 *.out
 *.test
+*.log
 tmp

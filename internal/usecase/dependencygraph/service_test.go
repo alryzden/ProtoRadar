@@ -432,6 +432,9 @@ func (repo *fakeVersions) add(version domain.ModuleVersion) {
 }
 
 func (repo *fakeVersions) Create(ctx context.Context, version domain.ModuleVersion) error { return nil }
+func (repo *fakeVersions) UpdateDeprecation(ctx context.Context, id domain.ModuleVersionID, deprecatedAt *time.Time, deprecatedBy string, deprecationReason string) error {
+	return nil
+}
 func (repo *fakeVersions) GetByID(ctx context.Context, id domain.ModuleVersionID) (domain.ModuleVersion, error) {
 	version, exists := repo.byID[id.String()]
 	if !exists {

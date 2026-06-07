@@ -130,7 +130,7 @@ func (repo *ModuleDependencyRepository) ListUnresolvedByModuleVersion(ctx contex
 
 func (repo *ModuleDependencyRepository) ListLatestPublishedModuleVersions(ctx context.Context) ([]domain.ModuleVersion, error) {
 	rows, err := repo.db.executor(ctx).Query(ctx, `
-		SELECT DISTINCT ON (module_id) id, module_id, version, digest, status, created_at
+		SELECT DISTINCT ON (module_id) `+moduleVersionColumns+`
 		FROM module_versions
 		WHERE status = $1
 		ORDER BY module_id, created_at DESC

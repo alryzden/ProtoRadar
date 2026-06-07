@@ -3,20 +3,27 @@ package config
 import "time"
 
 type RuntimeConfig struct {
-	Server   RuntimeServerConfig
-	Database RuntimeDatabaseConfig
-	Storage  RuntimeStorageConfig
-	Auth     RuntimeAuthConfig
-	Registry RuntimeRegistryConfig
-	Buf      RuntimeBufConfig
-	Breaking RuntimeBreakingConfig
-	UI       RuntimeUIConfig
-	Log      RuntimeLogConfig
+	Server          RuntimeServerConfig
+	Database        RuntimeDatabaseConfig
+	Storage         RuntimeStorageConfig
+	Auth            RuntimeAuthConfig
+	Registry        RuntimeRegistryConfig
+	Buf             RuntimeBufConfig
+	Breaking        RuntimeBreakingConfig
+	Governance      RuntimeGovernanceConfig
+	OutboxPublisher RuntimeOutboxPublisherConfig
+	UI              RuntimeUIConfig
+	Log             RuntimeLogConfig
 }
 
 type RuntimeServerConfig struct {
-	HTTPAddr            string
-	MaxRequestBodyBytes int64
+	HTTPAddr              string
+	HTTPReadHeaderTimeout time.Duration
+	HTTPReadTimeout       time.Duration
+	HTTPWriteTimeout      time.Duration
+	HTTPIdleTimeout       time.Duration
+	HTTPMaxHeaderBytes    int
+	MaxRequestBodyBytes   int64
 }
 
 type RuntimeDatabaseConfig struct {
@@ -58,6 +65,23 @@ type RuntimeBreakingConfig struct {
 	MaxReportBytes int
 	MaxChanges     int
 	DefaultAgainst string
+}
+
+type RuntimeGovernanceConfig struct {
+	Enabled                 bool
+	ProductionEnvironments  []string
+	AllowMaintainerApproval bool
+	ActorOverrideEnabled    bool
+}
+
+type RuntimeOutboxPublisherConfig struct {
+	Enabled             bool
+	BatchSize           int
+	PollInterval        time.Duration
+	LeaseDuration       time.Duration
+	MaxAttempts         int
+	InitialRetryBackoff time.Duration
+	MaxRetryBackoff     time.Duration
 }
 
 type RuntimeUIConfig struct {

@@ -1,0 +1,98 @@
+{{template "header" .}}
+{{with .ApprovalRequestView}}
+<nav class="breadcrumb" aria-label="Breadcrumb">
+  {{if .Request.BreakingReportURL}}<a href="{{.Request.BreakingReportURL}}">Breaking Report</a><span>/</span>{{end}}
+  <span>{{.Request.ID}}</span>
+</nav>
+<section class="hero compact">
+  <div>
+    <p class="eyebrow">Governance</p>
+    <h1><span class="code-inline">{{.Request.ID}}</span></h1>
+    <p>Read-only approval request details, requirements, decisions, and governance audit trail.</p>
+  </div>
+  <span class="{{badgeClass .Request.Status}}">{{badgeText .Request.Status}}</span>
+</section>
+<section class="grid three summary-grid">
+  <article class="card"><h2>Module</h2><p>{{if .Request.ModuleURL}}<a href="{{.Request.ModuleURL}}">{{.Request.Module}}</a>{{else}}{{.Request.Module}}{{end}}</p></article>
+  <article class="card"><h2>Breaking Report</h2><p>{{if .Request.BreakingReportURL}}<a class="code-inline" href="{{.Request.BreakingReportURL}}">{{.Request.BreakingReportID}}</a>{{else}}<span class="muted">None</span>{{end}}</p></article>
+  <article class="card"><h2>Target Ref</h2><p>{{if .Request.TargetRef}}<span class="code-inline">{{.Request.TargetRef}}</span>{{else}}<span class="muted">None</span>{{end}}</p></article>
+  <article class="card"><h2>Status</h2><p><span class="{{badgeClass .Request.Status}}">{{badgeText .Request.Status}}</span></p></article>
+  <article class="card"><h2>Approvals</h2><p>{{.Request.ReceivedApprovals}} / {{.Request.RequiredApprovals}}</p></article>
+  <article class="card"><h2>Created</h2><p>{{if .Request.CreatedAt}}{{.Request.CreatedAt}}{{else}}Unknown{{end}}</p></article>
+</section>
+<section class="card">
+  <div class="section-heading"><div><p class="eyebrow">Requirements</p><h2>Approval Requirements</h2></div></div>
+  {{if .Request.HasMissingWarnings}}
+  {{range .Request.MissingWarnings}}<p class="muted">{{.}}</p>{{end}}
+  {{end}}
+  {{if .Request.HasRequirements}}
+  <div class="table-wrap embedded">
+    <table>
+      <thead><tr><th>ID</th><th>Type</th><th>Target</th><th>Role</th><th>Status</th><th>Reason</th></tr></thead>
+      <tbody>
+        {{range .Request.Requirements}}
+        <tr>
+          <td><span class="code-inline">{{.ID}}</span></td>
+          <td><span class="code-inline">{{.RequirementType}}</span></td>
+          <td>{{if .TargetModuleName}}<a href="{{.TargetModuleURL}}">{{.TargetModuleName}}</a>{{else}}<span class="muted">Unknown</span>{{end}}</td>
+          <td>{{if .RequiredRole}}<span class="code-inline">{{.RequiredRole}}</span>{{else}}<span class="muted">None</span>{{end}}</td>
+          <td><span class="{{badgeClass .Status}}">{{badgeText .Status}}</span></td>
+          <td>{{if .Reason}}{{.Reason}}{{else}}<span class="muted">None</span>{{end}}</td>
+        </tr>
+        {{end}}
+      </tbody>
+    </table>
+  </div>
+  {{else}}
+  <p class="muted">No approval requirements were created.</p>
+  {{end}}
+</section>
+<section class="card">
+  <div class="section-heading"><div><p class="eyebrow">Decisions</p><h2>Approval Decisions</h2></div></div>
+  {{if .Request.HasDecisions}}
+  <div class="table-wrap embedded">
+    <table>
+      <thead><tr><th>ID</th><th>Requirement</th><th>Decision</th><th>Actor</th><th>Comment</th><th>Created</th></tr></thead>
+      <tbody>
+        {{range .Request.Decisions}}
+        <tr>
+          <td><span class="code-inline">{{.ID}}</span></td>
+          <td><span class="code-inline">{{.RequirementID}}</span></td>
+          <td><span class="{{badgeClass .Decision}}">{{badgeText .Decision}}</span></td>
+          <td>{{.DecidedBy}}</td>
+          <td>{{if .Comment}}{{.Comment}}{{else}}<span class="muted">None</span>{{end}}</td>
+          <td>{{if .CreatedAt}}{{.CreatedAt}}{{else}}<span class="muted">Unknown</span>{{end}}</td>
+        </tr>
+        {{end}}
+      </tbody>
+    </table>
+  </div>
+  {{else}}
+  <p class="muted">No decisions recorded yet.</p>
+  {{end}}
+</section>
+<section class="card">
+  <div class="section-heading"><div><p class="eyebrow">Audit</p><h2>Governance Audit Trail</h2></div></div>
+  {{if .HasAudit}}
+  <div class="table-wrap embedded">
+    <table>
+      <thead><tr><th>Created</th><th>Event</th><th>Actor</th><th>Module</th><th>Payload</th></tr></thead>
+      <tbody>
+        {{range .AuditTrail}}
+        <tr>
+          <td>{{if .CreatedAt}}{{.CreatedAt}}{{else}}<span class="muted">Unknown</span>{{end}}</td>
+          <td><span class="code-inline">{{.EventType}}</span></td>
+          <td>{{if .Actor}}{{.Actor}}{{else}}<span class="muted">Unknown</span>{{end}}</td>
+          <td>{{if .Module}}{{.Module}}{{else}}<span class="muted">None</span>{{end}}</td>
+          <td>{{if .PayloadJSON}}<span class="code-inline">{{.PayloadJSON}}</span>{{else}}<span class="muted">None</span>{{end}}</td>
+        </tr>
+        {{end}}
+      </tbody>
+    </table>
+  </div>
+  {{else}}
+  <p class="muted">No governance audit events recorded for this request.</p>
+  {{end}}
+</section>
+{{end}}
+{{template "footer" .}}

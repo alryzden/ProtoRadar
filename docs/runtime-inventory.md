@@ -9,6 +9,38 @@ Runtime inventory lets ProtoRadar answer two related questions:
 
 Services or deployment pipelines report the module versions they deployed. ProtoRadar stores each report as a deployment snapshot, calculates drift from the latest known contract version, and can show runtime impact for breaking changes.
 
+## Deprecated Module Versions
+
+A module version can be marked deprecated when the version should no longer be used by runtime services. Deprecation is metadata on the published module version:
+
+- it does not delete module version rows;
+- it does not delete stored source or Buf image artifacts;
+- it does not make the artifact unavailable for download by itself;
+- it records `deprecated_at`, `deprecated_by`, and `deprecation_reason` on module version API responses.
+
+Runtime services can still report deprecated versions. When a reported module/version exists in ProtoRadar and that version is deprecated, runtime inventory reports the usage with `drift_status: "deprecated_version"`.
+
+Deprecate a version with the CLI:
+
+```sh
+protoradar module version deprecate user-api v1.0.0 \
+  --reason "Use v1.2.0 instead."
+```
+
+Or through the REST API:
+
+```http
+POST /api/v1/modules/user-api/versions/v1.0.0/deprecate
+```
+
+```json
+{
+  "reason": "Use v1.2.0 instead."
+}
+```
+
+The endpoint requires normal bearer-token authentication and authorization for `module_version:deprecate`. The server sets `deprecated_by` from the authenticated principal; clients do not send an actor.
+
 ## Reporting From CI
 
 A deployment job can report inventory after a successful deploy:
@@ -76,16 +108,34 @@ List of reported protobuf module usages. Each entry contains `module` and `versi
 
 ProtoRadar calculates drift for every reported module usage:
 
-- `up_to_date`: reported version is the latest known version.
-- `behind_latest`: reported version is known but older than the latest known version.
 - `unknown_version`: module or version was not found in ProtoRadar.
-- `deprecated_version`: reported version is marked deprecated when module version status supports deprecation.
+- `deprecated_version`: reported module version exists and is marked deprecated.
+- `behind_latest`: reported version is known, is not deprecated, and is older than the latest known version.
+- `up_to_date`: reported version is known, is not deprecated, and is the latest known version.
+
+Drift precedence is `unknown_version`, then `deprecated_version`, then `behind_latest`, then `up_to_date`. Deprecated versions take precedence over `behind_latest`; if the latest known version is deprecated and a service reports it, the usage is still `deprecated_version`. Latest version calculation remains the latest published version and does not exclude deprecated versions.
 
 Drift is not a report failure. Runtime reports succeed even when usages are behind latest or unknown, because reporting stale or unknown data is still useful inventory.
+
+Example: if `billing-service` reports `user-api@v1.0.0` and `user-api@v1.0.0` is marked deprecated, the accepted report includes a usage similar to:
+
+```json
+{
+  "module": "user-api",
+  "version": "v1.0.0",
+  "latest_version": "v1.2.0",
+  "drift_status": "deprecated_version",
+  "drift_reason": "deprecated_version"
+}
+```
+
+If the reported version is not found in the registry, ProtoRadar reports `unknown_version` instead. Unknown versions have no stored module-version metadata, so they cannot be classified as deprecated.
 
 ## Runtime Impact For Breaking Changes
 
 Breaking report runtime impact identifies services that are currently using the exact base module version from a breaking report. This is an MVP exact-version match, not SemVer range analysis.
+
+Runtime impact uses a separate status, `potentially_affected_by_breaking_change`, in breaking-report context. It is not a normal runtime drift status and does not replace `deprecated_version`, `behind_latest`, `unknown_version`, or `up_to_date` in runtime inventory reports.
 
 Runtime impact appears in:
 
@@ -180,6 +230,7 @@ Use `examples/gitlab/protoradar-runtime-report.yml` after deployment jobs. The t
 - `PROTORADAR_BUILD_VERSION`
 - `PROTORADAR_RUNTIME_FILE`
 - `PROTORADAR_CLI_IMAGE`
+- `PROTORADAR_MODULE`
 - GitLab predefined variables such as `CI_PROJECT_NAME`, `CI_ENVIRONMENT_NAME`, `CI_COMMIT_SHA`, `CI_COMMIT_TAG`, and `CI_COMMIT_SHORT_SHA`.
 
 ## Limitations
@@ -191,3 +242,5 @@ Use `examples/gitlab/protoradar-runtime-report.yml` after deployment jobs. The t
 - Runtime impact uses exact base version matching in the MVP.
 - No generated client usage detection yet.
 - No token scopes or RBAC unless configured externally around ProtoRadar.
+- No automatic Slack/email/runtime alerting in Community.
+- No un-deprecate workflow is exposed by the Community API or CLI yet.

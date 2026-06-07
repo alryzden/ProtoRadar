@@ -17,9 +17,12 @@ import (
 var (
 	ErrUnauthorized = errors.New("unauthorized")
 	ErrConflict     = errors.New("conflict")
+	ErrForbidden    = errors.New("forbidden")
 	ErrNotFound     = errors.New("not found")
 	ErrTooLarge     = errors.New("artifact too large")
 )
+
+const defaultHTTPTimeout = 30 * time.Second
 
 type Error struct {
 	StatusCode int
@@ -41,6 +44,8 @@ func (err Error) Unwrap() error {
 		return ErrUnauthorized
 	case http.StatusConflict:
 		return ErrConflict
+	case http.StatusForbidden:
+		return ErrForbidden
 	case http.StatusNotFound:
 		return ErrNotFound
 	case http.StatusRequestEntityTooLarge:
@@ -70,17 +75,24 @@ type ListModulesResponse struct {
 }
 
 type ModuleVersion struct {
-	ID          string     `json:"id"`
-	ModuleID    string     `json:"module_id"`
-	Version     string     `json:"version"`
-	Digest      string     `json:"digest"`
-	Status      string     `json:"status"`
-	CreatedAt   time.Time  `json:"created_at"`
-	PublishedAt *time.Time `json:"published_at,omitempty"`
+	ID                string     `json:"id"`
+	ModuleID          string     `json:"module_id"`
+	Version           string     `json:"version"`
+	Digest            string     `json:"digest"`
+	Status            string     `json:"status"`
+	CreatedAt         time.Time  `json:"created_at"`
+	PublishedAt       *time.Time `json:"published_at,omitempty"`
+	DeprecatedAt      *time.Time `json:"deprecated_at,omitempty"`
+	DeprecatedBy      string     `json:"deprecated_by"`
+	DeprecationReason string     `json:"deprecation_reason"`
 }
 
 type ListModuleVersionsResponse struct {
 	Versions []ModuleVersion `json:"versions"`
+}
+
+type DeprecateModuleVersionRequest struct {
+	Reason string `json:"reason"`
 }
 
 type Artifact struct {
@@ -203,11 +215,83 @@ type RuntimeImpact struct {
 	ReportedAt   time.Time `json:"reported_at"`
 	ImpactStatus string    `json:"impact_status"`
 	Reason       string    `json:"reason"`
+	DriftStatus  string    `json:"drift_status"`
+	DriftReason  string    `json:"drift_reason"`
 }
 
 type BreakingReportRuntimeImpact struct {
 	ReportID string          `json:"report_id"`
 	Impacts  []RuntimeImpact `json:"impacts"`
+}
+
+type AddModuleOwnerRequest struct {
+	SubjectType string `json:"subject_type"`
+	Subject     string `json:"subject"`
+	Role        string `json:"role"`
+	Actor       string `json:"actor,omitempty"`
+}
+
+type ModuleOwner struct {
+	ID          string    `json:"id"`
+	ModuleID    string    `json:"module_id"`
+	ModuleName  string    `json:"module_name"`
+	SubjectType string    `json:"subject_type"`
+	Subject     string    `json:"subject"`
+	Role        string    `json:"role"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
+}
+
+type ListModuleOwnersResponse struct {
+	Module string        `json:"module"`
+	Owners []ModuleOwner `json:"owners"`
+}
+
+type CreateApprovalRequestRequest struct {
+	Actor string `json:"actor,omitempty"`
+}
+
+type ApprovalDecisionRequest struct {
+	Actor   string `json:"actor,omitempty"`
+	Comment string `json:"comment,omitempty"`
+}
+
+type ApprovalRequest struct {
+	ID                string                `json:"id"`
+	ModuleID          string                `json:"module_id"`
+	ModuleName        string                `json:"module_name"`
+	BreakingReportID  string                `json:"breaking_report_id"`
+	TargetRef         string                `json:"target_ref"`
+	Status            string                `json:"status"`
+	RequiredApprovals int                   `json:"required_approvals"`
+	ReceivedApprovals int                   `json:"received_approvals"`
+	Requirements      []ApprovalRequirement `json:"requirements"`
+	Decisions         []ApprovalDecision    `json:"decisions"`
+	CreatedAt         time.Time             `json:"created_at"`
+	UpdatedAt         time.Time             `json:"updated_at"`
+}
+
+type ApprovalRequirement struct {
+	ID                string    `json:"id"`
+	ApprovalRequestID string    `json:"approval_request_id"`
+	RequirementType   string    `json:"requirement_type"`
+	TargetModuleID    string    `json:"target_module_id"`
+	TargetModuleName  string    `json:"target_module_name"`
+	RequiredRole      string    `json:"required_role"`
+	Status            string    `json:"status"`
+	Reason            string    `json:"reason"`
+	CreatedAt         time.Time `json:"created_at"`
+	UpdatedAt         time.Time `json:"updated_at"`
+}
+
+type ApprovalDecision struct {
+	ID                string    `json:"id"`
+	ApprovalRequestID string    `json:"approval_request_id"`
+	RequirementID     string    `json:"requirement_id"`
+	Decision          string    `json:"decision"`
+	DecidedBy         string    `json:"decided_by"`
+	Comment           string    `json:"comment"`
+	CreatedAt         time.Time `json:"created_at"`
 }
 
 type ReportRuntimeInventoryRequest struct {
@@ -241,6 +325,19 @@ type ReportRuntimeInventoryResponse struct {
 	Usages       []RuntimeModuleUsage `json:"usages"`
 }
 
+type EditionResponse struct {
+	Edition      string             `json:"edition"`
+	Version      string             `json:"version"`
+	Commit       string             `json:"commit"`
+	BuildDate    string             `json:"build_date"`
+	Capabilities []CapabilityStatus `json:"capabilities"`
+}
+
+type CapabilityStatus struct {
+	Name    string `json:"name"`
+	Enabled bool   `json:"enabled"`
+}
+
 type ArtifactDownload struct {
 	Body           io.ReadCloser
 	ContentType    string
@@ -257,7 +354,7 @@ type Client struct {
 
 func NewClient(serverURL string, token string, httpClient *http.Client) *Client {
 	if httpClient == nil {
-		httpClient = http.DefaultClient
+		httpClient = &http.Client{Timeout: defaultHTTPTimeout}
 	}
 	return &Client{
 		baseURL:    strings.TrimRight(serverURL, "/"),
@@ -276,12 +373,25 @@ func (client *Client) CheckAuth(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("request failed: %w", err)
 	}
-	defer res.Body.Close()
+	defer closeResponseBody(res.Body)
 
 	if res.StatusCode < 200 || res.StatusCode >= 300 {
 		return client.responseError(res)
 	}
 	return nil
+}
+
+func (client *Client) GetEdition(ctx context.Context) (EditionResponse, error) {
+	req, err := client.newRequest(ctx, http.MethodGet, "/api/v1/edition", nil)
+	if err != nil {
+		return EditionResponse{}, err
+	}
+
+	var response EditionResponse
+	if err := client.doJSON(req, &response); err != nil {
+		return EditionResponse{}, err
+	}
+	return response, nil
 }
 
 func (client *Client) CreateModule(ctx context.Context, req CreateModuleRequest) (Module, error) {
@@ -355,6 +465,25 @@ func (client *Client) PublishModuleVersion(ctx context.Context, module string, v
 	var response PublishModuleVersionResponse
 	if err := client.doJSON(req, &response); err != nil {
 		return PublishModuleVersionResponse{}, err
+	}
+	return response, nil
+}
+
+func (client *Client) DeprecateModuleVersion(ctx context.Context, module string, version string, req DeprecateModuleVersionRequest) (ModuleVersion, error) {
+	var body bytes.Buffer
+	if err := json.NewEncoder(&body).Encode(req); err != nil {
+		return ModuleVersion{}, err
+	}
+
+	httpReq, err := client.newRequest(ctx, http.MethodPost, "/api/v1/modules/"+module+"/versions/"+version+"/deprecate", &body)
+	if err != nil {
+		return ModuleVersion{}, err
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+
+	var response ModuleVersion
+	if err := client.doJSON(httpReq, &response); err != nil {
+		return ModuleVersion{}, err
 	}
 	return response, nil
 }
@@ -452,6 +581,111 @@ func (client *Client) GetBreakingReportRuntimeImpact(ctx context.Context, report
 	return response, nil
 }
 
+func (client *Client) ListModuleOwners(ctx context.Context, module string) (ListModuleOwnersResponse, error) {
+	req, err := client.newRequest(ctx, http.MethodGet, "/api/v1/modules/"+module+"/owners", nil)
+	if err != nil {
+		return ListModuleOwnersResponse{}, err
+	}
+
+	var response ListModuleOwnersResponse
+	if err := client.doJSON(req, &response); err != nil {
+		return ListModuleOwnersResponse{}, err
+	}
+	return response, nil
+}
+
+func (client *Client) AddModuleOwner(ctx context.Context, module string, request AddModuleOwnerRequest) (ModuleOwner, error) {
+	var body bytes.Buffer
+	if err := json.NewEncoder(&body).Encode(request); err != nil {
+		return ModuleOwner{}, err
+	}
+
+	req, err := client.newRequest(ctx, http.MethodPost, "/api/v1/modules/"+module+"/owners", &body)
+	if err != nil {
+		return ModuleOwner{}, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	var response ModuleOwner
+	if err := client.doJSON(req, &response); err != nil {
+		return ModuleOwner{}, err
+	}
+	return response, nil
+}
+
+func (client *Client) RemoveModuleOwner(ctx context.Context, module string, ownerID string, actor string) error {
+	path := "/api/v1/modules/" + module + "/owners/" + ownerID
+	req, err := client.newRequest(ctx, http.MethodDelete, path, nil)
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(actor) != "" {
+		query := req.URL.Query()
+		query.Set("actor", strings.TrimSpace(actor))
+		req.URL.RawQuery = query.Encode()
+	}
+	return client.doNoContent(req)
+}
+
+func (client *Client) CreateApprovalRequest(ctx context.Context, reportID string, request CreateApprovalRequestRequest) (ApprovalRequest, error) {
+	var body bytes.Buffer
+	if err := json.NewEncoder(&body).Encode(request); err != nil {
+		return ApprovalRequest{}, err
+	}
+
+	req, err := client.newRequest(ctx, http.MethodPost, "/api/v1/breaking-reports/"+reportID+"/approval-request", &body)
+	if err != nil {
+		return ApprovalRequest{}, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	var response ApprovalRequest
+	if err := client.doJSON(req, &response); err != nil {
+		return ApprovalRequest{}, err
+	}
+	return response, nil
+}
+
+func (client *Client) GetApprovalStatus(ctx context.Context, reportID string) (ApprovalRequest, error) {
+	req, err := client.newRequest(ctx, http.MethodGet, "/api/v1/breaking-reports/"+reportID+"/approval-status", nil)
+	if err != nil {
+		return ApprovalRequest{}, err
+	}
+
+	var response ApprovalRequest
+	if err := client.doJSON(req, &response); err != nil {
+		return ApprovalRequest{}, err
+	}
+	return response, nil
+}
+
+func (client *Client) ApproveRequirement(ctx context.Context, requestID string, requirementID string, request ApprovalDecisionRequest) (ApprovalRequest, error) {
+	return client.recordApprovalDecision(ctx, requestID, requirementID, "approve", request)
+}
+
+func (client *Client) RejectRequirement(ctx context.Context, requestID string, requirementID string, request ApprovalDecisionRequest) (ApprovalRequest, error) {
+	return client.recordApprovalDecision(ctx, requestID, requirementID, "reject", request)
+}
+
+func (client *Client) recordApprovalDecision(ctx context.Context, requestID string, requirementID string, action string, request ApprovalDecisionRequest) (ApprovalRequest, error) {
+	var body bytes.Buffer
+	if err := json.NewEncoder(&body).Encode(request); err != nil {
+		return ApprovalRequest{}, err
+	}
+
+	req, err := client.newRequest(ctx, http.MethodPost, "/api/v1/approval-requests/"+requestID+"/requirements/"+requirementID+"/"+action, &body)
+	if err != nil {
+		return ApprovalRequest{}, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	var response ApprovalRequest
+	if err := client.doJSON(req, &response); err != nil {
+		return ApprovalRequest{}, err
+	}
+	return response, nil
+}
+
 func (client *Client) ReportRuntimeInventory(ctx context.Context, request ReportRuntimeInventoryRequest) (ReportRuntimeInventoryResponse, error) {
 	var body bytes.Buffer
 	if err := json.NewEncoder(&body).Encode(request); err != nil {
@@ -482,7 +716,7 @@ func (client *Client) DownloadArtifact(ctx context.Context, module string, versi
 		return ArtifactDownload{}, fmt.Errorf("request failed: %w", err)
 	}
 	if res.StatusCode < 200 || res.StatusCode >= 300 {
-		defer res.Body.Close()
+		defer closeResponseBody(res.Body)
 		return ArtifactDownload{}, client.responseError(res)
 	}
 
@@ -500,12 +734,25 @@ func (client *Client) doJSON(req *http.Request, dst any) error {
 	if err != nil {
 		return fmt.Errorf("request failed: %w", err)
 	}
-	defer res.Body.Close()
+	defer closeResponseBody(res.Body)
 
 	if res.StatusCode < 200 || res.StatusCode >= 300 {
 		return client.responseError(res)
 	}
 	return json.NewDecoder(res.Body).Decode(dst)
+}
+
+func (client *Client) doNoContent(req *http.Request) error {
+	res, err := client.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("request failed: %w", err)
+	}
+	defer closeResponseBody(res.Body)
+
+	if res.StatusCode < 200 || res.StatusCode >= 300 {
+		return client.responseError(res)
+	}
+	return nil
 }
 
 func (client *Client) newRequest(ctx context.Context, method string, path string, body io.Reader) (*http.Request, error) {
@@ -524,7 +771,7 @@ func (client *Client) newRequest(ctx context.Context, method string, path string
 }
 
 func (client *Client) responseError(res *http.Response) error {
-	body, _ := io.ReadAll(io.LimitReader(res.Body, 1024))
+	body := readLimitedResponseBody(res.Body)
 	code, text := parseErrorBody(body)
 	if client.token != "" {
 		text = strings.ReplaceAll(text, client.token, "[redacted]")
@@ -535,6 +782,20 @@ func (client *Client) responseError(res *http.Response) error {
 		Code:       code,
 		Body:       text,
 	}
+}
+
+func closeResponseBody(body io.Closer) {
+	// Client response bodies are read-only cleanup resources here; the command
+	// result is determined by the already-read status/body.
+	_ = body.Close() //nolint:errcheck
+}
+
+func readLimitedResponseBody(reader io.Reader) []byte {
+	body, err := io.ReadAll(io.LimitReader(reader, 1024))
+	if err != nil {
+		return body
+	}
+	return body
 }
 
 func parseErrorBody(body []byte) (string, string) {

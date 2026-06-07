@@ -1,8 +1,7 @@
 # Reusable ProtoRadar merge-request bot job for GitLab merge request pipelines.
-# Override PROTORADAR_CLI_IMAGE until an official ProtoRadar CLI image is published.
+# PROTORADAR_CLI_IMAGE is required and must point to an image with protoradar on PATH.
 
 variables:
-  PROTORADAR_CLI_IMAGE: "ghcr.io/alryzden/protoradar-cli:latest"
   PROTORADAR_PROTO_PATH: "."
   PROTORADAR_AGAINST: "latest"
   PROTORADAR_REPORT_FILE: "protoradar-mr-report.md"
@@ -12,7 +11,7 @@ protoradar:mr-check:
   stage: validate
   rules:
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
-  script:
+  before_script:
     - |
       set -eu
       if [ -z "${PROTORADAR_SERVER_URL:-}" ]; then
@@ -23,14 +22,26 @@ protoradar:mr-check:
         echo "PROTORADAR_TOKEN is required. Configure it as a masked GitLab CI/CD variable." >&2
         exit 2
       fi
-      if [ -z "${PROTORADAR_GITLAB_TOKEN:-}" ]; then
-        echo "PROTORADAR_GITLAB_TOKEN is required. Configure it as a masked GitLab CI/CD variable." >&2
-        exit 2
-      fi
       if [ -z "${PROTORADAR_MODULE:-}" ]; then
         echo "PROTORADAR_MODULE is required" >&2
         exit 2
       fi
+      if [ -z "${PROTORADAR_CLI_IMAGE:-}" ]; then
+        echo "PROTORADAR_CLI_IMAGE is required and must contain the protoradar CLI" >&2
+        exit 2
+      fi
+      if [ -z "${PROTORADAR_GITLAB_TOKEN:-}" ] && [ -z "${GITLAB_TOKEN:-}" ]; then
+        echo "PROTORADAR_GITLAB_TOKEN or GITLAB_TOKEN is required. Configure it as a masked GitLab CI/CD variable." >&2
+        exit 2
+      fi
+      if [ -z "${CI_SERVER_URL:-}" ] || [ -z "${CI_PROJECT_ID:-}" ] || [ -z "${CI_MERGE_REQUEST_IID:-}" ] || [ -z "${CI_COMMIT_SHA:-}" ]; then
+        echo "CI_SERVER_URL, CI_PROJECT_ID, CI_MERGE_REQUEST_IID, and CI_COMMIT_SHA are required" >&2
+        exit 2
+      fi
+      protoradar version
+  script:
+    - |
+      set -eu
       protoradar gitlab mr-check \
         --module "${PROTORADAR_MODULE}" \
         --path "${PROTORADAR_PROTO_PATH:-.}" \
@@ -40,7 +51,7 @@ protoradar:mr-check:
         --merge-request-iid "${CI_MERGE_REQUEST_IID}" \
         --commit-sha "${CI_COMMIT_SHA}" \
         --target-ref "${CI_COMMIT_SHA}" \
-        --status-target-url "${CI_JOB_URL}" \
+        --status-target-url "${CI_JOB_URL:-}" \
         --report-file "${PROTORADAR_REPORT_FILE:-protoradar-mr-report.md}"
   artifacts:
     when: always

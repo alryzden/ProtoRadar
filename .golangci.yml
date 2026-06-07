@@ -1,0 +1,137 @@
+# ProtoRadar golangci-lint configuration.
+# Place this file in the repository root next to go.mod.
+# Requires golangci-lint v2 config format.
+
+version: "2"
+
+run:
+  timeout: 5m
+  tests: true
+  relative-path-mode: gomod
+  modules-download-mode: readonly
+  allow-parallel-runners: true
+  go: "1.26"
+
+linters:
+  # Start from an explicit set to avoid noisy "enable all" behavior.
+  default: none
+  enable:
+    # Core correctness / standard analysis.
+    - govet
+    - staticcheck
+    - unused
+    - ineffassign
+
+    # Error handling and lifecycle/resource safety.
+    - errcheck
+    - errorlint
+    - bodyclose
+    - rowserrcheck
+    - sqlclosecheck
+    - nilerr
+    - nilnil
+    - durationcheck
+    - contextcheck
+    - noctx
+
+    # Security-adjacent checks. Keep enabled, but review findings carefully.
+    - gosec
+
+    # Readability / simplification. Useful, but not excessively strict.
+    - gocritic
+    - gocyclo
+    - unconvert
+    - misspell
+    - whitespace
+    - copyloopvar
+
+  settings:
+    errcheck:
+      # Type assertions are often intentionally unchecked in tests/fakes.
+      check-type-assertions: false
+      check-blank: true
+      exclude-functions:
+        # fmt.Fprintln/Fprintf to stderr/stdout in CLI/main code should not create noise.
+        - fmt.Fprint
+        - fmt.Fprintf
+        - fmt.Fprintln
+        - fmt.Print
+        - fmt.Printf
+        - fmt.Println
+
+    gocyclo:
+      # Current usecase/CLI validation paths are intentionally explicit. Keep this
+      # as a high-signal guardrail and use `gocyclo -over 15 internal cmd` for
+      # stricter readability audits.
+      min-complexity: 40
+
+    gocritic:
+      enabled-tags:
+        - diagnostic
+        - performance
+        - style
+      disabled-checks:
+        # These tend to produce style noise and are not useful enough initially.
+        - hugeParam
+        # Parameter type combining creates broad mechanical churn with little
+        # readability benefit in this codebase.
+        - paramTypeCombine
+        # The project uses explicit value DTO mapping heavily. Range copy warnings
+        # are reviewed during performance work instead of enforced as CI blockers.
+        - rangeValCopy
+        - unnamedResult
+        - whyNoLint
+
+    gosec:
+      # Keep gosec broad, but document suppressions inline with // #nosec and a reason.
+      # No exclusions by default.
+      excludes: []
+
+  exclusions:
+    generated: lax
+    warn-unused: false
+    presets:
+      - comments
+      - common-false-positives
+      - legacy
+    rules:
+      # Tests often intentionally use simplified error handling, hardcoded values,
+      # and complex table setups. Keep important analyzers running, but reduce noise.
+      - path: _test\.go
+        linters:
+          - errcheck
+          - gosec
+          - gocyclo
+          - gocritic
+          - noctx
+          - contextcheck
+
+      # Migration files are often long raw SQL strings and may trigger gosec false positives.
+      - path: internal/repository/postgres/migrations/.*\.go
+        linters:
+          - gosec
+
+      # Command entrypoints may print to stderr/stdout intentionally.
+      - path: cmd/.*\.go
+        text: "Error return value of .* is not checked"
+        linters:
+          - errcheck
+
+      # Server shutdown intentionally starts from a fresh root context so a
+      # canceled signal context does not consume the shutdown timeout.
+      - path: cmd/protoradar-server/main\.go
+        text: "Non-inherited new context"
+        linters:
+          - contextcheck
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
+  uniq-by-line: true
+
+output:
+  sort-order:
+    - linter
+    - severity
+    - file
+  show-stats: true

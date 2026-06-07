@@ -57,7 +57,7 @@ func NewService(
 	dependencies ModuleVersionDependencyRebuilder,
 	dependencyRead domain.ModuleDependencyRepository,
 	transactions domain.RegistryTransactionManager,
-	outbox outbox.Writer,
+	outboxWriter outbox.Writer,
 	artifactStore storage.ArtifactStore,
 	bufWorkflow BufWorkflow,
 	bufBreaking BufBreakingChecker,
@@ -78,7 +78,7 @@ func NewService(
 		dependencies:   dependencies,
 		dependencyRead: dependencyRead,
 		transactions:   transactions,
-		outbox:         outbox,
+		outbox:         outboxWriter,
 		artifactStore:  artifactStore,
 		bufWorkflow:    bufWorkflow,
 		bufBreaking:    bufBreaking,
@@ -305,14 +305,14 @@ func (svc *Service) PublishModuleVersion(ctx context.Context, req PublishModuleV
 	if err != nil {
 		return PublishModuleVersionResponse{}, err
 	}
-	defer os.RemoveAll(workdir)
+	defer removeTempDir(workdir)
 
 	maxUncompressed := svc.options.MaxSourceUncompressedSizeBytes
 	if maxUncompressed <= 0 {
 		maxUncompressed = svc.options.MaxArtifactSizeBytes
 	}
 	if err := workspace.ExtractTarGzSafe(ctx, bytes.NewReader(sourceBody), workdir, workspace.ExtractOptions{MaxUncompressedSizeBytes: maxUncompressed}); err != nil {
-		return PublishModuleVersionResponse{}, fmt.Errorf("%w: %v", ErrUnsafeArchive, err)
+		return PublishModuleVersionResponse{}, fmt.Errorf("%w: %w", ErrUnsafeArchive, err)
 	}
 	if svc.options.BufRequireConfig {
 		if _, err := os.Stat(filepath.Join(workdir, "buf.yaml")); err != nil {
@@ -340,12 +340,12 @@ func (svc *Service) PublishModuleVersion(ctx context.Context, req PublishModuleV
 
 	sourceObject, err := svc.artifactStore.Put(ctx, sourceKey, bytes.NewReader(sourceBody), sourceSizeBytes)
 	if err != nil {
-		return PublishModuleVersionResponse{}, fmt.Errorf("%w: %v", ErrStorageFailure, err)
+		return PublishModuleVersionResponse{}, fmt.Errorf("%w: %w", ErrStorageFailure, err)
 	}
 	bufImageObject, err := svc.artifactStore.Put(ctx, bufImageKey, bytes.NewReader(bufResult.BufImage), bufImageSizeBytes)
 	if err != nil {
-		_ = svc.artifactStore.Delete(ctx, sourceKey)
-		return PublishModuleVersionResponse{}, fmt.Errorf("%w: %v", ErrStorageFailure, err)
+		svc.cleanupUploadedArtifacts(ctx, sourceKey)
+		return PublishModuleVersionResponse{}, fmt.Errorf("%w: %w", ErrStorageFailure, err)
 	}
 
 	now := svc.clock.Now()
@@ -492,6 +492,70 @@ func (svc *Service) GetModuleVersion(ctx context.Context, moduleName string, ver
 	return moduleVersion, err
 }
 
+func (svc *Service) DeprecateModuleVersion(ctx context.Context, input DeprecateModuleVersionInput) (DeprecateModuleVersionOutput, error) {
+	name, err := domain.NewModuleName(input.ModuleName)
+	if err != nil {
+		return DeprecateModuleVersionOutput{}, ErrInvalidModuleName
+	}
+	versionValue, err := domain.NewVersion(input.Version)
+	if err != nil {
+		return DeprecateModuleVersionOutput{}, ErrInvalidVersion
+	}
+	actor := strings.TrimSpace(input.Actor)
+	if actor == "" {
+		return DeprecateModuleVersionOutput{}, ErrInvalidActor
+	}
+	reason := strings.TrimSpace(input.Reason)
+
+	module, err := svc.modules.GetByName(ctx, name)
+	if errors.Is(err, domain.ErrNotFound) {
+		return DeprecateModuleVersionOutput{}, ErrModuleNotFound
+	}
+	if err != nil {
+		return DeprecateModuleVersionOutput{}, err
+	}
+	moduleVersion, err := svc.versions.GetByModuleAndVersion(ctx, module.ID, versionValue)
+	if errors.Is(err, domain.ErrNotFound) {
+		return DeprecateModuleVersionOutput{}, ErrModuleNotFound
+	}
+	if err != nil {
+		return DeprecateModuleVersionOutput{}, err
+	}
+	if moduleVersion.IsDeprecated() {
+		return DeprecateModuleVersionOutput{Version: moduleVersion}, nil
+	}
+
+	now := svc.clock.Now()
+	err = svc.transactions.WithinTransaction(ctx, func(txCtx context.Context) error {
+		if err := svc.versions.UpdateDeprecation(txCtx, moduleVersion.ID, &now, actor, reason); err != nil {
+			return err
+		}
+		deprecatedVersion := moduleVersion
+		deprecatedVersion.DeprecatedAt = &now
+		deprecatedVersion.DeprecatedBy = actor
+		deprecatedVersion.DeprecationReason = reason
+		record, err := protoradarevents.NewModuleVersionDeprecated(protoradarevents.ModuleVersionDeprecated{
+			Module:            module,
+			Version:           deprecatedVersion,
+			DeprecatedBy:      actor,
+			DeprecationReason: reason,
+			OccurredAt:        now,
+		})
+		if err != nil {
+			return err
+		}
+		return svc.outbox.Create(txCtx, record)
+	})
+	if err != nil {
+		return DeprecateModuleVersionOutput{}, err
+	}
+
+	moduleVersion.DeprecatedAt = &now
+	moduleVersion.DeprecatedBy = actor
+	moduleVersion.DeprecationReason = reason
+	return DeprecateModuleVersionOutput{Version: moduleVersion}, nil
+}
+
 func (svc *Service) GetModuleVersionDetails(ctx context.Context, moduleName string, versionValue string) (ModuleVersionDetailsResponse, error) {
 	moduleVersion, err := svc.GetModuleVersion(ctx, moduleName, versionValue)
 	if err != nil {
@@ -597,14 +661,14 @@ func (svc *Service) CheckBreaking(ctx context.Context, req CheckBreakingRequest)
 	if err != nil {
 		return CheckBreakingResponse{}, err
 	}
-	defer os.RemoveAll(workdir)
+	defer removeTempDir(workdir)
 
 	maxUncompressed := svc.options.MaxSourceUncompressedSizeBytes
 	if maxUncompressed <= 0 {
 		maxUncompressed = svc.options.MaxArtifactSizeBytes
 	}
 	if err := workspace.ExtractTarGzSafe(ctx, bytes.NewReader(sourceBody), workdir, workspace.ExtractOptions{MaxUncompressedSizeBytes: maxUncompressed}); err != nil {
-		return CheckBreakingResponse{}, fmt.Errorf("%w: %v", ErrUnsafeArchive, err)
+		return CheckBreakingResponse{}, fmt.Errorf("%w: %w", ErrUnsafeArchive, err)
 	}
 	if _, err := os.Stat(filepath.Join(workdir, "buf.yaml")); err != nil {
 		if os.IsNotExist(err) {
@@ -619,7 +683,7 @@ func (svc *Service) CheckBreaking(ctx context.Context, req CheckBreakingRequest)
 		TargetRef:     targetRef,
 	})
 	if err != nil {
-		return CheckBreakingResponse{}, fmt.Errorf("%w: %v", ErrBufBreakingFailed, err)
+		return CheckBreakingResponse{}, fmt.Errorf("%w: %w", ErrBufBreakingFailed, err)
 	}
 	status := checkResult.Status
 	if status == "" {
@@ -734,7 +798,7 @@ func (svc *Service) DownloadArtifact(ctx context.Context, moduleName string, ver
 
 	object, err := svc.artifactStore.Get(ctx, artifact.StorageKey)
 	if err != nil {
-		return storage.ArtifactObject{}, domain.Artifact{}, fmt.Errorf("%w: %v", ErrStorageFailure, err)
+		return storage.ArtifactObject{}, domain.Artifact{}, fmt.Errorf("%w: %w", ErrStorageFailure, err)
 	}
 	return object, artifact, nil
 }
@@ -780,7 +844,9 @@ func (svc *Service) AuthenticateToken(ctx context.Context, rawToken string) (Aut
 	if token.IsExpired(now) {
 		return AuthSubject{}, ErrInvalidOrExpiredToken
 	}
-	_ = svc.tokens.MarkUsed(ctx, token.ID, now)
+	if err := svc.tokens.MarkUsed(ctx, token.ID, now); err != nil {
+		svc.recordTokenUsageFailure(ctx, token.ID, err)
+	}
 
 	return AuthSubject{
 		TokenID: token.ID,
@@ -798,7 +864,7 @@ func (svc *Service) readArtifact(reader io.Reader) ([]byte, string, int64, error
 	hasher := sha256.New()
 	written, err := io.Copy(io.MultiWriter(&buffer, hasher), io.LimitReader(reader, limit+1))
 	if err != nil {
-		return nil, "", 0, fmt.Errorf("%w: %v", ErrStorageFailure, err)
+		return nil, "", 0, fmt.Errorf("%w: %w", ErrStorageFailure, err)
 	}
 	if written > limit {
 		return nil, "", 0, ErrArtifactTooLarge
@@ -810,13 +876,13 @@ func (svc *Service) readArtifact(reader io.Reader) ([]byte, string, int64, error
 func (svc *Service) readStoredArtifact(ctx context.Context, storageKey string) ([]byte, error) {
 	object, err := svc.artifactStore.Get(ctx, storageKey)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrStorageFailure, err)
+		return nil, fmt.Errorf("%w: %w", ErrStorageFailure, err)
 	}
-	defer object.Body.Close()
+	defer closeArtifactBody(object.Body)
 
 	body, err := io.ReadAll(object.Body)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrStorageFailure, err)
+		return nil, fmt.Errorf("%w: %w", ErrStorageFailure, err)
 	}
 	return body, nil
 }
@@ -848,12 +914,24 @@ func checksumBytes(body []byte) (string, int64) {
 
 func mapBufWorkflowError(err error, result BufWorkflowResult) error {
 	if result.LintResult.Status == domain.BufLintStatusFailed {
-		return fmt.Errorf("%w: %v", ErrBufLintFailed, err)
+		return fmt.Errorf("%w: %w", ErrBufLintFailed, err)
 	}
 	if len(result.BufImage) > 0 {
-		return fmt.Errorf("%w: %v", ErrDescriptorExtractionFailed, err)
+		return fmt.Errorf("%w: %w", ErrDescriptorExtractionFailed, err)
 	}
-	return fmt.Errorf("%w: %v", ErrBufBuildFailed, err)
+	return fmt.Errorf("%w: %w", ErrBufBuildFailed, err)
+}
+
+func removeTempDir(path string) {
+	// Temporary workdirs are best-effort cleanup; the operation result is
+	// determined by the primary publish/check-breaking error path.
+	_ = os.RemoveAll(path) //nolint:errcheck
+}
+
+func closeArtifactBody(body io.Closer) {
+	// Stored artifact body close is cleanup after the read path has captured its
+	// primary error or result.
+	_ = body.Close() //nolint:errcheck
 }
 
 func lintResultFromConfig(config domain.BufConfigInfo) domain.BufLintResult {
@@ -868,8 +946,30 @@ func (svc *Service) cleanupUploadedArtifacts(ctx context.Context, keys ...string
 		if key == "" {
 			continue
 		}
-		_ = svc.artifactStore.Delete(ctx, key)
+		if err := svc.artifactStore.Delete(ctx, key); err != nil {
+			svc.recordArtifactCleanupFailure(ctx, key, err)
+		}
 	}
+}
+
+func (svc *Service) recordArtifactCleanupFailure(ctx context.Context, key string, err error) {
+	if svc.options.ArtifactCleanupObserver == nil {
+		return
+	}
+	svc.options.ArtifactCleanupObserver.RecordArtifactCleanupFailure(ctx, ArtifactCleanupFailure{
+		StorageKey: key,
+		Error:      err,
+	})
+}
+
+func (svc *Service) recordTokenUsageFailure(ctx context.Context, tokenID domain.APITokenID, err error) {
+	if svc.options.TokenUsageObserver == nil {
+		return
+	}
+	svc.options.TokenUsageObserver.RecordTokenUsageFailure(ctx, TokenUsageFailure{
+		TokenID: tokenID.String(),
+		Error:   err,
+	})
 }
 
 func (svc *Service) hashToken(rawToken string) string {

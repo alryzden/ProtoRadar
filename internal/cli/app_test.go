@@ -13,6 +13,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/alryzden/ProtoRadar/internal/cli/config"
 )
@@ -36,7 +37,7 @@ func TestHelpContainsKeyCommands(t *testing.T) {
 		t.Fatalf("help: %v", err)
 	}
 	text := output.String()
-	for _, want := range []string{"login", "version", "module create", "module list", "push", "pull", "check-breaking", "gitlab mr-check", "runtime report", "PROTORADAR_SERVER_URL", "PROTORADAR_TOKEN"} {
+	for _, want := range []string{"login", "version", "edition", "module create", "module list", "module owners", "module version", "push", "pull", "check-breaking", "gitlab mr-check", "runtime report", "approvals", "PROTORADAR_SERVER_URL", "PROTORADAR_TOKEN"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("help missing %q:\n%s", want, text)
 		}
@@ -55,6 +56,153 @@ func TestVersionCommandPrintsBuildMetadata(t *testing.T) {
 		if !strings.Contains(text, want) {
 			t.Fatalf("version output missing %q: %q", want, text)
 		}
+	}
+}
+
+func TestAppDefaultHTTPClientHasFiniteTimeout(t *testing.T) {
+	app := App{}
+
+	client, err := app.httpClient(config.Config{})
+	if err != nil {
+		t.Fatalf("http client: %v", err)
+	}
+	if client.Timeout != config.DefaultHTTPTimeout {
+		t.Fatalf("timeout = %s, want %s", client.Timeout, config.DefaultHTTPTimeout)
+	}
+}
+
+func TestAppPreservesInjectedHTTPClient(t *testing.T) {
+	injected := &http.Client{Timeout: 7 * time.Second}
+	app := App{HTTPClient: injected}
+
+	client, err := app.httpClient(config.Config{HTTPTimeout: 45 * time.Second})
+	if err != nil {
+		t.Fatalf("http client: %v", err)
+	}
+	if client != injected {
+		t.Fatalf("injected HTTP client was not preserved")
+	}
+}
+
+func TestAppHTTPClientUsesTimeoutOverride(t *testing.T) {
+	app := App{}
+
+	client, err := app.httpClient(config.Config{HTTPTimeout: 45 * time.Second})
+	if err != nil {
+		t.Fatalf("http client: %v", err)
+	}
+	if client.Timeout != 45*time.Second {
+		t.Fatalf("timeout = %s", client.Timeout)
+	}
+}
+
+func TestAppHTTPClientUsesTimeoutEnvOverride(t *testing.T) {
+	t.Setenv("PROTORADAR_CLI_HTTP_TIMEOUT", "12s")
+	cfg, err := config.Load(filepath.Join(t.TempDir(), "missing.yaml"))
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	app := App{}
+
+	client, err := app.httpClient(cfg)
+	if err != nil {
+		t.Fatalf("http client: %v", err)
+	}
+	if client.Timeout != 12*time.Second {
+		t.Fatalf("timeout = %s", client.Timeout)
+	}
+}
+
+func TestAppHTTPClientRejectsNonPositiveTimeoutOverride(t *testing.T) {
+	app := App{}
+
+	_, err := app.httpClient(config.Config{HTTPTimeout: -time.Second})
+	if err == nil || err.Error() != "cli.http_timeout must be positive" {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestGitLabMRCommandUsesTimeoutAwareHTTPClient(t *testing.T) {
+	source := readCLISource(t, "gitlab_mr.go")
+
+	if !strings.Contains(source, "app.httpClient(cfg)") {
+		t.Fatalf("gitlab mr-check must build GitLab client from app.httpClient(cfg)")
+	}
+	if strings.Contains(source, "gitlabapi.NewClient(input.GitLabBaseURL, input.GitLabToken, app.HTTPClient)") {
+		t.Fatalf("gitlab mr-check must not pass app.HTTPClient directly to GitLab client")
+	}
+}
+
+func TestEditionCommandCallsEndpointAndPrintsCapabilities(t *testing.T) {
+	var seenPath string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer prr_token" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		seenPath = r.URL.Path
+		if r.Method != http.MethodGet || r.URL.Path != "/api/v1/edition" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		writeJSON(t, w, http.StatusOK, map[string]any{
+			"edition":    "community",
+			"version":    "v1.2.0",
+			"commit":     "abc123",
+			"build_date": "2026-06-05T12:00:00Z",
+			"capabilities": []map[string]any{
+				{"name": "registry", "enabled": true},
+				{"name": "breaking_checks", "enabled": true},
+				{"name": "gitlab_mr_bot", "enabled": true},
+				{"name": "oidc_auth", "enabled": false},
+				{"name": "advanced_rbac", "enabled": false},
+				{"name": "gitlab_group_sync", "enabled": false},
+			},
+		})
+	}))
+	defer server.Close()
+
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	saveCLIConfig(t, configPath, server.URL)
+	var output bytes.Buffer
+	app := App{ConfigPath: configPath, HTTPClient: server.Client(), Out: &output}
+
+	if err := app.Run(context.Background(), []string{"edition"}); err != nil {
+		t.Fatalf("edition: %v", err)
+	}
+	if seenPath != "/api/v1/edition" {
+		t.Fatalf("path = %q", seenPath)
+	}
+	text := output.String()
+	for _, want := range []string{"Edition: community", "Version: v1.2.0", "Enabled capabilities:", "- registry", "- breaking_checks", "- gitlab_mr_bot", "Unavailable enterprise capabilities:", "- oidc_auth", "- advanced_rbac", "- gitlab_group_sync"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("edition output missing %q:\n%s", want, text)
+		}
+	}
+}
+
+func TestEditionCommandAPIErrorMapsToExitCodeTwo(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(t, w, http.StatusUnauthorized, map[string]any{"error": map[string]string{"code": "unauthorized", "message": "Authentication is required."}})
+	}))
+	defer server.Close()
+
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	saveCLIConfig(t, configPath, server.URL)
+	err := (App{ConfigPath: configPath, HTTPClient: server.Client(), Out: &bytes.Buffer{}}).Run(context.Background(), []string{"edition"})
+	if exitCode(err) != 2 {
+		t.Fatalf("exit code = %d, err = %v", exitCode(err), err)
+	}
+}
+
+func TestEditionCommandNetworkErrorMapsToExitCodeTwo(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	saveCLIConfig(t, configPath, "http://127.0.0.1:1")
+	err := (App{ConfigPath: configPath, HTTPClient: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		return nil, errors.New("network down")
+	})}, Out: &bytes.Buffer{}}).Run(context.Background(), []string{"edition"})
+	if exitCode(err) != 2 {
+		t.Fatalf("exit code = %d, err = %v", exitCode(err), err)
 	}
 }
 
@@ -306,6 +454,68 @@ func TestPushDisplaysAPIErrorsClearly(t *testing.T) {
 	err := app.Run(context.Background(), []string{"push", "user-api", "--version", "v1.0.0", "--path", root})
 	if err == nil || !strings.Contains(err.Error(), "buf build failed") {
 		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestModuleVersionDeprecateCallsEndpointAndDoesNotPrintToken(t *testing.T) {
+	var (
+		seenMethod string
+		seenPath   string
+		seenReason string
+	)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer prr_token" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		seenMethod = r.Method
+		seenPath = r.URL.Path
+		if r.Method != http.MethodPost || r.URL.Path != "/api/v1/modules/user-api/versions/v1.0.0/deprecate" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		var req map[string]string
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		seenReason = req["reason"]
+		writeJSON(t, w, http.StatusOK, map[string]any{
+			"id":                 "module-version-1",
+			"module_id":          "module-1",
+			"version":            "v1.0.0",
+			"digest":             "sha256:abc",
+			"status":             "published",
+			"created_at":         "2026-06-04T12:00:00Z",
+			"deprecated_at":      "2026-06-04T12:30:00Z",
+			"deprecated_by":      "ci-token",
+			"deprecation_reason": "Use v1.1.0 instead.",
+		})
+	}))
+	defer server.Close()
+
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	saveCLIConfig(t, configPath, server.URL)
+	var output bytes.Buffer
+	app := App{ConfigPath: configPath, HTTPClient: server.Client(), Out: &output}
+
+	err := app.Run(context.Background(), []string{"module", "version", "deprecate", "user-api", "v1.0.0", "--reason", "Use v1.1.0 instead."})
+	if err != nil {
+		t.Fatalf("deprecate: %v", err)
+	}
+	if seenMethod != http.MethodPost || seenPath != "/api/v1/modules/user-api/versions/v1.0.0/deprecate" {
+		t.Fatalf("request = %s %s", seenMethod, seenPath)
+	}
+	if seenReason != "Use v1.1.0 instead." {
+		t.Fatalf("reason = %q", seenReason)
+	}
+	text := output.String()
+	for _, want := range []string{"Deprecated user-api v1.0.0", "Deprecated at: 2026-06-04T12:30:00Z", "Deprecated by: ci-token", "Reason: Use v1.1.0 instead."} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("output missing %q:\n%s", want, text)
+		}
+	}
+	if strings.Contains(text, "prr_token") {
+		t.Fatalf("output printed token: %s", text)
 	}
 }
 
@@ -1078,6 +1288,31 @@ func TestGitLabMRCheckUsesEnvDefaults(t *testing.T) {
 	}
 }
 
+func TestGitLabMRCheckUsesGitLabTokenFallback(t *testing.T) {
+	state := newMRCheckServerState(passedMRReport())
+	server := gitLabMRCheckServer(t, state)
+	defer server.Close()
+
+	t.Setenv("PROTORADAR_SERVER_URL", server.URL)
+	t.Setenv("PROTORADAR_TOKEN", "prr_token")
+	t.Setenv("PROTORADAR_MODULE", "user-api")
+	t.Setenv("PROTORADAR_PROTO_PATH", validWorkspace(t))
+	t.Setenv("CI_SERVER_URL", server.URL)
+	t.Setenv("CI_PROJECT_ID", "123")
+	t.Setenv("CI_MERGE_REQUEST_IID", "7")
+	t.Setenv("CI_COMMIT_SHA", "abc123")
+	t.Setenv("GITLAB_TOKEN", "gitlab_secret")
+
+	var output bytes.Buffer
+	app := App{ConfigPath: filepath.Join(t.TempDir(), "missing.yaml"), HTTPClient: server.Client(), Out: &output}
+	if err := app.Run(context.Background(), []string{"gitlab", "mr-check"}); err != nil {
+		t.Fatalf("gitlab mr-check: %v", err)
+	}
+	if len(state.createdNoteBodies) != 1 {
+		t.Fatalf("created notes = %d", len(state.createdNoteBodies))
+	}
+}
+
 func TestGitLabMRCheckRequiresInputs(t *testing.T) {
 	tests := []struct {
 		name string
@@ -1146,6 +1381,8 @@ func TestGitLabMRCheckFetchesRuntimeImpact(t *testing.T) {
 			"build_version": "2026.06.04-15",
 			"impact_status": "potentially_affected_by_breaking_change",
 			"reason":        "exact version match",
+			"drift_status":  "deprecated_version",
+			"drift_reason":  "deprecated_version",
 			"reported_at":   "2026-06-04T12:00:00Z",
 		}},
 	}
@@ -1159,8 +1396,73 @@ func TestGitLabMRCheckFetchesRuntimeImpact(t *testing.T) {
 	if state.runtimeImpactCalls != 1 || state.runtimeImpactReportID != "report-2" {
 		t.Fatalf("runtime impact calls=%d reportID=%q", state.runtimeImpactCalls, state.runtimeImpactReportID)
 	}
-	if len(state.createdNoteBodies) != 1 || !strings.Contains(state.createdNoteBodies[0], "| `billing-service` | `production` | `user-api@v1.2.0` | `2026.06.04-15` | `abc1234` |") {
+	if len(state.createdNoteBodies) != 1 || !strings.Contains(state.createdNoteBodies[0], "| `billing-service` | `production` | `user-api@v1.2.0` | `2026.06.04-15` | `abc1234` | `deprecated_version` | deprecated_version |") {
 		t.Fatalf("created note bodies = %#v", state.createdNoteBodies)
+	}
+}
+
+func TestGitLabMRCheckGovernanceCreatesApprovalRequestWithoutActorByDefault(t *testing.T) {
+	state := newMRCheckServerState(breakingMRReport())
+	state.approvalStatusStatus = http.StatusNotFound
+	state.approvalRequestBody = mrApprovalRequestJSON("pending", "ci-token-principal")
+	server := gitLabMRCheckServer(t, state)
+	defer server.Close()
+
+	_, err := runGitLabMRCheckAgainstServer(t, server, []string{"gitlab", "mr-check", "--module", "user-api", "--path", validWorkspace(t), "--against", "latest", "--gitlab-base-url", server.URL, "--project-id", "123", "--merge-request-iid", "7", "--commit-sha", "abc123", "--gitlab-token", "gitlab_secret", "--governance=true"})
+	if exitCode(err) != 1 {
+		t.Fatalf("err=%v exit=%d", err, exitCode(err))
+	}
+	if state.approvalCreateCalls != 1 {
+		t.Fatalf("approval create calls = %d", state.approvalCreateCalls)
+	}
+	if _, ok := state.approvalCreateRequest["actor"]; ok {
+		t.Fatalf("actor should be omitted by default: %#v", state.approvalCreateRequest)
+	}
+	if len(state.createdNoteBodies) != 1 || !strings.Contains(state.createdNoteBodies[0], "ci-token-principal") || strings.Contains(state.createdNoteBodies[0], "gitlab_secret") {
+		t.Fatalf("created note bodies = %#v", state.createdNoteBodies)
+	}
+}
+
+func TestGitLabMRCheckGovernanceSendsActorOnlyWhenExplicitlyProvided(t *testing.T) {
+	state := newMRCheckServerState(breakingMRReport())
+	state.approvalStatusStatus = http.StatusNotFound
+	state.approvalRequestBody = mrApprovalRequestJSON("pending", "alice")
+	server := gitLabMRCheckServer(t, state)
+	defer server.Close()
+
+	_, err := runGitLabMRCheckAgainstServer(t, server, []string{"gitlab", "mr-check", "--module", "user-api", "--path", validWorkspace(t), "--against", "latest", "--gitlab-base-url", server.URL, "--project-id", "123", "--merge-request-iid", "7", "--commit-sha", "abc123", "--gitlab-token", "gitlab_secret", "--governance=true", "--governance-actor", "alice"})
+	if exitCode(err) != 1 {
+		t.Fatalf("err=%v exit=%d", err, exitCode(err))
+	}
+	if state.approvalCreateRequest["actor"] != "alice" {
+		t.Fatalf("approval request = %#v", state.approvalCreateRequest)
+	}
+}
+
+func TestGitLabMRCheckGovernanceActorOverrideRejectionIsClear(t *testing.T) {
+	state := newMRCheckServerState(breakingMRReport())
+	state.approvalStatusStatus = http.StatusNotFound
+	state.approvalCreateStatus = http.StatusForbidden
+	state.approvalCreateBody = map[string]any{
+		"error": map[string]string{
+			"code":    "forbidden",
+			"message": "Governance actor is not allowed. PROTORADAR_TOKEN=prr_super_secret",
+		},
+	}
+	server := gitLabMRCheckServer(t, state)
+	defer server.Close()
+
+	output, err := runGitLabMRCheckAgainstServer(t, server, []string{"gitlab", "mr-check", "--module", "user-api", "--path", validWorkspace(t), "--against", "latest", "--gitlab-base-url", server.URL, "--project-id", "123", "--merge-request-iid", "7", "--commit-sha", "abc123", "--gitlab-token", "gitlab_secret", "--governance=true", "--governance-actor", "alice"})
+	if exitCode(err) != 2 {
+		t.Fatalf("err=%v exit=%d", err, exitCode(err))
+	}
+	if err == nil || !strings.Contains(err.Error(), "server rejected governance actor override") || !strings.Contains(err.Error(), "omit --governance-actor") {
+		t.Fatalf("error = %v", err)
+	}
+	for _, forbidden := range []string{"prr_super_secret", "gitlab_secret"} {
+		if strings.Contains(output, forbidden) || strings.Contains(err.Error(), forbidden) {
+			t.Fatalf("token leaked: output=%q err=%v", output, err)
+		}
 	}
 }
 
@@ -1248,6 +1550,13 @@ type mrCheckServerState struct {
 	runtimeImpactBody     any
 	runtimeImpactCalls    int
 	runtimeImpactReportID string
+	approvalStatusStatus  int
+	approvalStatusBody    any
+	approvalCreateStatus  int
+	approvalCreateBody    any
+	approvalCreateCalls   int
+	approvalCreateRequest map[string]string
+	approvalRequestBody   any
 	createNoteStatus      int
 	notes                 []map[string]any
 	gotAgainst            string
@@ -1260,12 +1569,14 @@ type mrCheckServerState struct {
 
 func newMRCheckServerState(body any) *mrCheckServerState {
 	return &mrCheckServerState{
-		breakingStatus:      http.StatusOK,
-		breakingBody:        body,
-		runtimeImpactStatus: http.StatusOK,
-		runtimeImpactBody:   map[string]any{"report_id": "report-1", "impacts": []map[string]any{}},
-		createNoteStatus:    http.StatusCreated,
-		notes:               []map[string]any{},
+		breakingStatus:       http.StatusOK,
+		breakingBody:         body,
+		runtimeImpactStatus:  http.StatusOK,
+		runtimeImpactBody:    map[string]any{"report_id": "report-1", "impacts": []map[string]any{}},
+		approvalStatusStatus: http.StatusNotFound,
+		approvalCreateStatus: http.StatusCreated,
+		createNoteStatus:     http.StatusCreated,
+		notes:                []map[string]any{},
 	}
 }
 
@@ -1300,6 +1611,42 @@ func breakingMRReport() map[string]any {
 	}
 }
 
+func mrApprovalRequestJSON(status string, decidedBy string) map[string]any {
+	return map[string]any{
+		"id":                 "approval-1",
+		"module_id":          "module-user-api",
+		"module_name":        "user-api",
+		"breaking_report_id": "report-2",
+		"target_ref":         "abc123",
+		"status":             status,
+		"required_approvals": 1,
+		"received_approvals": 1,
+		"created_at":         "2026-06-05T12:00:00Z",
+		"updated_at":         "2026-06-05T12:00:00Z",
+		"requirements": []map[string]any{{
+			"id":                  "requirement-1",
+			"approval_request_id": "approval-1",
+			"requirement_type":    "module_owner_approval",
+			"target_module_id":    "module-user-api",
+			"target_module_name":  "user-api",
+			"required_role":       "owner",
+			"status":              "approved",
+			"reason":              "Breaking changes require approval from module owner.",
+			"created_at":          "2026-06-05T12:00:00Z",
+			"updated_at":          "2026-06-05T12:00:00Z",
+		}},
+		"decisions": []map[string]any{{
+			"id":                  "decision-1",
+			"approval_request_id": "approval-1",
+			"requirement_id":      "requirement-1",
+			"decision":            "approved",
+			"decided_by":          decidedBy,
+			"comment":             "approved by returned server actor",
+			"created_at":          "2026-06-05T12:00:00Z",
+		}},
+	}
+}
+
 func gitLabMRCheckServer(t *testing.T, state *mrCheckServerState) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1327,6 +1674,30 @@ func handleProtoRadarMRCheckRequest(t *testing.T, state *mrCheckServerState, w h
 		}
 		state.runtimeImpactCalls++
 		writeJSON(t, w, state.runtimeImpactStatus, state.runtimeImpactBody)
+		return
+	}
+	if r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/api/v1/breaking-reports/") && strings.HasSuffix(r.URL.Path, "/approval-status") {
+		body := state.approvalStatusBody
+		if body == nil {
+			body = map[string]any{"error": map[string]string{"code": "not_found", "message": "Requested resource was not found."}}
+		}
+		writeJSON(t, w, state.approvalStatusStatus, body)
+		return
+	}
+	if r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/api/v1/breaking-reports/") && strings.HasSuffix(r.URL.Path, "/approval-request") {
+		state.approvalCreateCalls++
+		if err := json.NewDecoder(r.Body).Decode(&state.approvalCreateRequest); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		body := state.approvalCreateBody
+		if body == nil {
+			body = state.approvalRequestBody
+		}
+		if body == nil {
+			body = mrApprovalRequestJSON("pending", "ci-token-principal")
+		}
+		writeJSON(t, w, state.approvalCreateStatus, body)
 		return
 	}
 	if r.Method != http.MethodPost || r.URL.Path != "/api/v1/modules/user-api/breaking-checks" {
@@ -1840,6 +2211,15 @@ func writeJSON(t *testing.T, w http.ResponseWriter, status int, body any) {
 	if err := json.NewEncoder(w).Encode(body); err != nil {
 		t.Fatalf("write json: %v", err)
 	}
+}
+
+func readCLISource(t *testing.T, name string) string {
+	t.Helper()
+	body, err := os.ReadFile(filepath.Join(".", name))
+	if err != nil {
+		t.Fatalf("read CLI source: %v", err)
+	}
+	return string(body)
 }
 
 type roundTripFunc func(*http.Request) (*http.Response, error)

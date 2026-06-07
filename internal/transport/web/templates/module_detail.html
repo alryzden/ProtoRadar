@@ -18,6 +18,40 @@
 <section class="card">
   <div class="section-heading">
     <div>
+      <p class="eyebrow">Governance</p>
+      <h2>Owners and Maintainers</h2>
+    </div>
+  </div>
+  {{if .HasOwners}}
+  <div class="table-wrap embedded">
+    <table>
+      <thead>
+        <tr>
+          <th>Subject Type</th>
+          <th>Subject</th>
+          <th>Role</th>
+          <th>Created</th>
+        </tr>
+      </thead>
+      <tbody>
+        {{range .Owners}}
+        <tr>
+          <td><span class="code-inline">{{.SubjectType}}</span></td>
+          <td>{{.Subject}}</td>
+          <td><span class="{{badgeClass .Role}}">{{badgeText .Role}}</span></td>
+          <td>{{if .CreatedAt}}{{.CreatedAt}}{{else}}<span class="muted">Unknown</span>{{end}}</td>
+        </tr>
+        {{end}}
+      </tbody>
+    </table>
+  </div>
+  {{else}}
+  <p class="muted">No owners or maintainers configured.</p>
+  {{end}}
+</section>
+<section class="card">
+  <div class="section-heading">
+    <div>
       <p class="eyebrow">Dependencies</p>
       <h2>Dependency Graph</h2>
     </div>

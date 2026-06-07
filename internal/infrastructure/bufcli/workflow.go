@@ -112,9 +112,9 @@ func (workflow *Workflow) CheckBreaking(ctx context.Context, input registry.BufB
 		return registry.BufBreakingCheckResult{Status: domain.BreakingReportStatusFailed}, err
 	}
 	baselinePath := baselineFile.Name()
-	defer os.Remove(baselinePath)
+	defer removeBaselineFile(baselinePath)
 	if _, err := baselineFile.Write(input.BaselineImage); err != nil {
-		_ = baselineFile.Close()
+		closeBaselineFile(baselineFile)
 		return registry.BufBreakingCheckResult{Status: domain.BreakingReportStatusFailed}, err
 	}
 	if err := baselineFile.Close(); err != nil {
@@ -168,6 +168,16 @@ func (workflow *Workflow) CheckBreaking(ctx context.Context, input registry.BufB
 		RawOutput:    rawOutput,
 		HumanSummary: breakingSummary(len(changes)),
 	}, nil
+}
+
+func removeBaselineFile(path string) {
+	// Temporary baseline file removal is best-effort after the Buf command path.
+	_ = os.Remove(path) //nolint:errcheck
+}
+
+func closeBaselineFile(file *os.File) {
+	// A close failure after a write failure is secondary to the write error.
+	_ = file.Close() //nolint:errcheck
 }
 
 func (workflow *Workflow) runBuild(ctx context.Context, workdir string) (commandResult, error) {
@@ -403,6 +413,8 @@ type commandRunner interface {
 type execCommandRunner struct{}
 
 func (execCommandRunner) Run(ctx context.Context, spec commandSpec) (commandResult, error) {
+	// #nosec G204 -- this adapter's job is to execute the configured Buf binary
+	// with arguments assembled by the workflow, under the caller's context.
 	cmd := exec.CommandContext(ctx, spec.path, spec.args...)
 	cmd.Dir = spec.dir
 	stdout := newCommandBuffer(spec.stdoutLimit)

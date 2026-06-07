@@ -10,7 +10,9 @@ ProtoRadar includes a Basic Web UI for local demos and internal inspection. It i
 - protobuf descriptor metadata;
 - breaking reports;
 - direct dependency graph data;
-- runtime inventory and drift.
+- runtime inventory and drift;
+- governance owners, approval status, approval request details, and audit trail;
+- Community edition, version/build metadata, and capability status.
 
 The UI is intended to make registry state easier to inspect without relying only on CLI output or raw REST responses.
 
@@ -93,6 +95,7 @@ Inspect the UI:
 
 - open `/ui/modules` to see the module list;
 - open `/ui/modules/user-api` to see module details and versions;
+- open `/ui/modules/user-api` to see configured owners and maintainers;
 - open `/ui/modules/user-api/versions/v1.0.0` to inspect artifacts, Buf config, and descriptor metadata.
 - open `/ui/modules/user-api/dependencies` to inspect downstream consumers, upstream dependencies, and unresolved dependencies.
 - open `/ui/modules/user-api/runtime-usages` to inspect services reporting runtime usage of the module.
@@ -122,10 +125,24 @@ protoradar check-breaking user-api \
 Then open `/ui/breaking-reports` and the generated report detail page.
 Breaking report detail pages include potentially affected modules when downstream consumers are known and runtime impact when services report usage of the affected module version.
 
+Create governance state:
+
+```sh
+protoradar module owners add user-api \
+  --subject-type team \
+  --subject platform-team \
+  --role owner
+
+protoradar approvals request \
+  --report-id <breaking_report_id>
+```
+
+Then open the breaking report detail page to inspect approval status and follow the approval request link for requirements, decisions, and audit trail.
+
 ## Pages
 
 - `/ui/modules`: module list with latest version and compatibility summary.
-- `/ui/modules/{module}`: module details, versions, and recent breaking reports.
+- `/ui/modules/{module}`: module details, owners/maintainers, versions, and recent breaking reports.
 - `/ui/modules/{module}/dependencies`: direct downstream consumers, upstream dependencies, and unresolved dependencies.
 - `/ui/modules/{module}/runtime-usages`: services and environments reporting runtime usage of a module.
 - `/ui/modules/{module}/versions/{version}`: version details, artifacts, Buf config, descriptor metadata, and related reports.
@@ -133,7 +150,21 @@ Breaking report detail pages include potentially affected modules when downstrea
 - `/ui/runtime/services/{service}`: runtime service deployments and module usages.
 - `/ui/runtime/environments/{environment}`: services and module usages reported in an environment.
 - `/ui/breaking-reports`: breaking report list.
-- `/ui/breaking-reports/{report_id}`: breaking report summary, change details, potentially affected modules, and runtime impact.
+- `/ui/breaking-reports/{report_id}`: breaking report summary, change details, potentially affected modules, runtime impact, and approval status when an approval request exists.
+- `/ui/approval-requests/{request_id}`: approval request status, requirements, decisions, and governance audit trail.
+- `/ui/about`: Community edition, version/build metadata, enabled capabilities, and unavailable enterprise capabilities.
+
+Runtime pages display server-calculated drift statuses, including `deprecated_version`, as badges. Breaking report runtime impact shows both the breaking impact status and the stored runtime drift status for matching usages. The Web UI does not calculate drift itself and does not implement enterprise runtime alerts.
+
+Deprecated runtime usage appears anywhere runtime module usages are shown:
+
+- service details;
+- environment inventory;
+- module runtime usages;
+- runtime service summaries through the Deprecated count;
+- breaking report runtime impact when the matched usage is also deprecated.
+
+The UI renders the server-returned drift status and reason only. It does not look up module version deprecation metadata independently and does not expose API tokens. Deprecation reason/date/actor are available from module version API responses when the server returns them for that version.
 
 Static CSS is served from `/ui/static/app.css` by default.
 
@@ -169,10 +200,11 @@ Runtime service filters:
 
 ## Security Notes
 
-- The UI is read-only.
+- The UI is read-only, including governance pages.
 - No login or RBAC exists yet.
 - Do not expose the UI publicly without authentication or a trusted reverse proxy.
 - No tokens or secrets are displayed by the UI.
+- `/ui/about` reports capabilities and build metadata only; it does not display tokens, hashes, credentials, or license data.
 - The UI should be treated as local/demo/internal-only until authentication and authorization are added.
 
 ## Limitations
@@ -180,5 +212,7 @@ Runtime service filters:
 - No login/RBAC yet.
 - Dependency graph support is direct-only; transitive traversal is not implemented yet.
 - Runtime inventory reports are snapshots, not continuous heartbeats.
-- No approval workflow UI yet.
+- Governance approval state is visible, but approve/reject actions are not available from the UI.
 - No write operations from the UI yet.
+- The UI can display deprecated runtime drift, but it cannot mark or unmark versions as deprecated.
+- No automatic Slack/email/runtime alerting is implemented in Community.

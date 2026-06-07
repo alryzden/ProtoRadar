@@ -233,7 +233,9 @@ func (repo *RuntimeInventoryRepository) ListRuntimeImpactByModuleVersion(ctx con
 			rd.build_version,
 			rd.reported_at,
 			$4 AS impact_status,
-			'exact runtime module version matches breaking report base version' AS reason
+			'exact runtime module version matches breaking report base version' AS reason,
+			rmu.drift_status,
+			rmu.drift_reason
 		FROM runtime_module_usages rmu
 		JOIN runtime_deployments rd ON rd.id = rmu.deployment_id
 		JOIN runtime_services rs ON rs.id = rd.service_id
@@ -570,8 +572,9 @@ func scanRuntimeImpact(scan func(dest ...any) error) (domain.RuntimeImpact, erro
 	var moduleNameValue string
 	var versionValue string
 	var impactStatusValue string
+	var driftStatusValue string
 	var item domain.RuntimeImpact
-	if err := scan(&serviceNameValue, &environmentValue, &moduleNameValue, &versionValue, &item.GitCommit, &item.BuildVersion, &item.ReportedAt, &impactStatusValue, &item.Reason); err != nil {
+	if err := scan(&serviceNameValue, &environmentValue, &moduleNameValue, &versionValue, &item.GitCommit, &item.BuildVersion, &item.ReportedAt, &impactStatusValue, &item.Reason, &driftStatusValue, &item.DriftReason); err != nil {
 		return domain.RuntimeImpact{}, err
 	}
 	serviceName, err := domain.NewRuntimeServiceName(serviceNameValue)
@@ -590,11 +593,16 @@ func scanRuntimeImpact(scan func(dest ...any) error) (domain.RuntimeImpact, erro
 	if err != nil {
 		return domain.RuntimeImpact{}, err
 	}
+	driftStatus, err := domain.NewRuntimeDriftStatus(driftStatusValue)
+	if err != nil {
+		return domain.RuntimeImpact{}, err
+	}
 	item.ServiceName = serviceName
 	item.Environment = environment
 	item.UsedModule = moduleName
 	item.UsedVersion = version
 	item.ImpactStatus = domain.RuntimeImpactStatus(impactStatusValue)
+	item.DriftStatus = driftStatus
 	return item, nil
 }
 

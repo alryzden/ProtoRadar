@@ -1,6 +1,9 @@
 package domain
 
-import "testing"
+import (
+	"errors"
+	"testing"
+)
 
 func TestNewBreakingReportStatusAcceptsSupportedStatuses(t *testing.T) {
 	for _, value := range []string{"passed", "breaking", "failed"} {
@@ -15,7 +18,7 @@ func TestNewBreakingReportStatusAcceptsSupportedStatuses(t *testing.T) {
 }
 
 func TestNewBreakingReportStatusRejectsInvalidStatus(t *testing.T) {
-	if _, err := NewBreakingReportStatus("warning"); err != ErrInvalidBreakingStatus {
+	if _, err := NewBreakingReportStatus("warning"); !errors.Is(err, ErrInvalidBreakingStatus) {
 		t.Fatalf("error = %v, want ErrInvalidBreakingStatus", err)
 	}
 }

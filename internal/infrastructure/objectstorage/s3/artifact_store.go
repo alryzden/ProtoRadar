@@ -155,7 +155,7 @@ func (client realClient) get(ctx context.Context, bucket string, key string) (st
 
 	info, err := object.Stat()
 	if err != nil {
-		object.Close()
+		closeObject(object)
 		return storedObject{}, err
 	}
 
@@ -164,6 +164,12 @@ func (client realClient) get(ctx context.Context, bucket string, key string) (st
 		contentType: info.ContentType,
 		sizeBytes:   info.Size,
 	}, nil
+}
+
+func closeObject(body io.Closer) {
+	// If Stat fails, the Stat error is the actionable result; closing the
+	// partially opened object is best-effort cleanup.
+	_ = body.Close() //nolint:errcheck
 }
 
 func (client realClient) delete(ctx context.Context, bucket string, key string) error {

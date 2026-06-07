@@ -34,6 +34,7 @@ type Report struct {
 	AffectedModules          []AffectedModule
 	RuntimeImpacts           []RuntimeImpact
 	RuntimeImpactUnavailable bool
+	Governance               *Governance
 	ReportID                 string
 	TargetURL                string
 	CommitSHA                string
@@ -60,6 +61,29 @@ type RuntimeImpact struct {
 	UsedVersion  string
 	BuildVersion string
 	GitCommit    string
+	DriftStatus  string
+	DriftReason  string
+}
+
+type Governance struct {
+	Status               string
+	ApprovalRequestID    string
+	Requirements         []GovernanceRequirement
+	Decisions            []GovernanceDecision
+	MissingOwnerWarnings []string
+}
+
+type GovernanceRequirement struct {
+	RequirementType  string
+	TargetModuleName string
+	Status           string
+	Reason           string
+}
+
+type GovernanceDecision struct {
+	Decision  string
+	DecidedBy string
+	Comment   string
 }
 
 type RenderOptions struct {
@@ -133,6 +157,7 @@ func RenderReport(report Report, options RenderOptions) string {
 	writeChanges(&builder, report, maxChanges)
 	writeAffectedModules(&builder, report.AffectedModules, maxAffectedModules)
 	writeRuntimeImpact(&builder, report, maxRuntimeImpacts)
+	writeGovernance(&builder, report.Governance)
 	writeResult(&builder, report.Status)
 	writeMetadata(&builder, report)
 	return builder.String()
@@ -218,21 +243,74 @@ func writeRuntimeImpact(builder *strings.Builder, report Report, maxRuntimeImpac
 	if limit > maxRuntimeImpacts {
 		limit = maxRuntimeImpacts
 	}
-	builder.WriteString("| Service | Environment | Uses | Build | Commit |\n")
-	builder.WriteString("| --- | --- | --- | --- | --- |\n")
+	builder.WriteString("| Service | Environment | Uses | Build | Commit | Runtime drift | Drift reason |\n")
+	builder.WriteString("| --- | --- | --- | --- | --- | --- | --- |\n")
 	for _, impact := range report.RuntimeImpacts[:limit] {
 		uses := defaultIfBlank(impact.UsedModule, report.Module) + "@" + defaultIfBlank(impact.UsedVersion, report.Against)
-		fmt.Fprintf(builder, "| `%s` | `%s` | `%s` | `%s` | `%s` |\n",
+		fmt.Fprintf(builder, "| `%s` | `%s` | `%s` | `%s` | `%s` | `%s` | %s |\n",
 			tableCell(defaultIfBlank(impact.ServiceName, "unknown service")),
 			tableCell(defaultIfBlank(impact.Environment, "unknown environment")),
 			tableCell(defaultIfBlank(uses, "unknown")),
 			tableCell(defaultIfBlank(impact.BuildVersion, "unknown")),
 			tableCell(defaultIfBlank(impact.GitCommit, "unknown")),
+			tableCell(defaultIfBlank(impact.DriftStatus, "unknown")),
+			tableCell(defaultIfBlank(impact.DriftReason, "none")),
 		)
 	}
 	builder.WriteString("\n")
 	if len(report.RuntimeImpacts) > limit {
 		fmt.Fprintf(builder, "_And %d more runtime usages. See ProtoRadar UI for the full runtime inventory._\n\n", len(report.RuntimeImpacts)-limit)
+	}
+}
+
+func writeGovernance(builder *strings.Builder, governance *Governance) {
+	if governance == nil {
+		return
+	}
+
+	builder.WriteString("### Governance\n\n")
+	switch normalizedGovernanceStatus(governance.Status) {
+	case "approved":
+		builder.WriteString("Status: ✅ Approved\n\n")
+	case "rejected":
+		builder.WriteString("Status: ❌ Rejected\n\n")
+	case "not_required":
+		builder.WriteString("Status: ✅ Approval not required\n\n")
+	case "pending":
+		builder.WriteString("Status: ⏳ Approval required\n\n")
+	default:
+		builder.WriteString("Status: ⚠️ Governance status unavailable\n\n")
+	}
+
+	for _, warning := range governance.MissingOwnerWarnings {
+		if strings.TrimSpace(warning) != "" {
+			fmt.Fprintf(builder, "%s\n\n", tableCell(warning))
+		}
+	}
+	if len(governance.Requirements) > 0 {
+		builder.WriteString("| Requirement | Target | Status | Reason |\n")
+		builder.WriteString("|---|---|---|---|\n")
+		for _, requirement := range governance.Requirements {
+			fmt.Fprintf(builder, "| %s | `%s` | %s | %s |\n",
+				tableCell(requirementLabel(requirement.RequirementType)),
+				tableCell(defaultIfBlank(requirement.TargetModuleName, "unknown module")),
+				tableCell(defaultIfBlank(statusLabel(requirement.Status), "Unknown")),
+				tableCell(defaultIfBlank(requirement.Reason, "unspecified")),
+			)
+		}
+		builder.WriteString("\n")
+	}
+	if len(governance.Decisions) > 0 {
+		builder.WriteString("| Decision | Decided by | Comment |\n")
+		builder.WriteString("|---|---|---|\n")
+		for _, decision := range governance.Decisions {
+			fmt.Fprintf(builder, "| %s | %s | %s |\n",
+				tableCell(defaultIfBlank(statusLabel(decision.Decision), "Unknown")),
+				tableCell(defaultIfBlank(decision.DecidedBy, "not returned")),
+				tableCell(defaultIfBlank(decision.Comment, "none")),
+			)
+		}
+		builder.WriteString("\n")
 	}
 }
 
@@ -242,7 +320,7 @@ func writeResult(builder *strings.Builder, status string) {
 	case statusPassed:
 		builder.WriteString("Safe to merge from the protobuf compatibility perspective.\n\n")
 	case statusBreaking:
-		builder.WriteString("Restore compatibility, coordinate a major version, or wait for the future approval workflow.\n\n")
+		builder.WriteString("Restore compatibility, coordinate a major version, or complete the required governance approval workflow.\n\n")
 	default:
 		builder.WriteString("Check job logs and configuration.\n\n")
 	}
@@ -264,6 +342,36 @@ func writeMetadata(builder *strings.Builder, report Report) {
 	if strings.TrimSpace(report.CommitSHA) != "" {
 		writeRow(builder, "Commit SHA", report.CommitSHA)
 	}
+}
+
+func normalizedGovernanceStatus(status string) string {
+	return strings.ToLower(strings.TrimSpace(status))
+}
+
+func requirementLabel(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "module_owner_approval":
+		return "Module owner approval"
+	case "affected_consumer_approval":
+		return "Affected consumer approval"
+	default:
+		return strings.TrimSpace(value)
+	}
+}
+
+func statusLabel(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	parts := strings.Split(strings.ReplaceAll(value, "_", " "), " ")
+	for index, part := range parts {
+		if part == "" {
+			continue
+		}
+		parts[index] = strings.ToUpper(part[:1]) + strings.ToLower(part[1:])
+	}
+	return strings.Join(parts, " ")
 }
 
 func writeRow(builder *strings.Builder, field string, value string) {

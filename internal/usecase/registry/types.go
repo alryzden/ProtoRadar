@@ -34,6 +34,24 @@ type BufBreakingChecker interface {
 	CheckBreaking(ctx context.Context, input BufBreakingCheckInput) (BufBreakingCheckResult, error)
 }
 
+type ArtifactCleanupObserver interface {
+	RecordArtifactCleanupFailure(ctx context.Context, failure ArtifactCleanupFailure)
+}
+
+type ArtifactCleanupFailure struct {
+	StorageKey string
+	Error      error
+}
+
+type TokenUsageObserver interface {
+	RecordTokenUsageFailure(ctx context.Context, failure TokenUsageFailure)
+}
+
+type TokenUsageFailure struct {
+	TokenID string
+	Error   error
+}
+
 type BufWorkflowOptions struct {
 	RequireBufYAML bool
 	RunLint        bool
@@ -74,6 +92,8 @@ type Options struct {
 	BufLintMode                    string
 	BreakingMaxChanges             int
 	BreakingDefaultAgainst         string
+	ArtifactCleanupObserver        ArtifactCleanupObserver
+	TokenUsageObserver             TokenUsageObserver
 }
 
 type CreateModuleRequest struct {
@@ -101,6 +121,17 @@ type PublishModuleVersionRequest struct {
 	ModuleName string
 	Version    string
 	Artifact   io.Reader
+}
+
+type DeprecateModuleVersionInput struct {
+	ModuleName string
+	Version    string
+	Actor      string
+	Reason     string
+}
+
+type DeprecateModuleVersionOutput struct {
+	Version domain.ModuleVersion
 }
 
 type CheckBreakingRequest struct {

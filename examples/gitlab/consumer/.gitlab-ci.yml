@@ -12,6 +12,6 @@ variables:
   PROTORADAR_MODULE: "user-api"
   PROTORADAR_PROTO_PATH: "."
   PROTORADAR_AGAINST: "latest"
-  # Override this until your organization publishes a ProtoRadar CLI image.
-  PROTORADAR_CLI_IMAGE: "registry.example.com/platform/protoradar-cli:latest"
-  # Configure PROTORADAR_TOKEN and PROTORADAR_GITLAB_TOKEN as masked GitLab CI/CD variables.
+  # Required: set this to an image your runner can pull or already has locally.
+  PROTORADAR_CLI_IMAGE: "registry.example.com/platform/protoradar-cli:v1.0.0"
+  # Configure PROTORADAR_TOKEN and PROTORADAR_GITLAB_TOKEN or GITLAB_TOKEN as masked GitLab CI/CD variables.

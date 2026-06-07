@@ -20,6 +20,7 @@ type ModuleGitLabProjectRepository interface {
 
 type ModuleVersionRepository interface {
 	Create(ctx context.Context, version ModuleVersion) error
+	UpdateDeprecation(ctx context.Context, id ModuleVersionID, deprecatedAt *time.Time, deprecatedBy string, deprecationReason string) error
 	GetByID(ctx context.Context, id ModuleVersionID) (ModuleVersion, error)
 	GetByModuleAndVersion(ctx context.Context, moduleID ModuleID, version Version) (ModuleVersion, error)
 	GetLatestByModule(ctx context.Context, moduleID ModuleID) (ModuleVersion, error)
@@ -90,6 +91,31 @@ type APITokenRepository interface {
 	GetByID(ctx context.Context, id APITokenID) (APIToken, error)
 	GetByHash(ctx context.Context, tokenHash string) (APIToken, error)
 	MarkUsed(ctx context.Context, id APITokenID, usedAt time.Time) error
+}
+
+type ModuleOwnerRepository interface {
+	Add(ctx context.Context, owner ModuleOwner) error
+	Remove(ctx context.Context, id ModuleOwnerID, updatedAt time.Time) error
+	GetByID(ctx context.Context, id ModuleOwnerID) (ModuleOwner, error)
+	ListByModule(ctx context.Context, moduleID ModuleID) ([]ModuleOwner, error)
+	HasRole(ctx context.Context, moduleID ModuleID, subjectType GovernanceSubjectType, subject string, roles []ModuleOwnerRole) (bool, error)
+}
+
+type ApprovalRepository interface {
+	CreateRequest(ctx context.Context, request ApprovalRequest) error
+	GetRequestByID(ctx context.Context, id ApprovalRequestID) (ApprovalRequest, error)
+	GetRequestByBreakingReportID(ctx context.Context, reportID BreakingReportID) (ApprovalRequest, error)
+	GetRequestByRequirementID(ctx context.Context, requirementID ApprovalRequirementID) (ApprovalRequest, error)
+	AddDecision(ctx context.Context, decision ApprovalDecision) error
+	UpdateRequirementStatus(ctx context.Context, id ApprovalRequirementID, status ApprovalRequirementStatus, updatedAt time.Time) error
+	UpdateRequestStatus(ctx context.Context, id ApprovalRequestID, status ApprovalRequestStatus, requiredApprovals int, receivedApprovals int, updatedAt time.Time) error
+	ListRequestsByModule(ctx context.Context, moduleID ModuleID, limit int, offset int) ([]ApprovalRequest, error)
+}
+
+type GovernanceAuditRepository interface {
+	Append(ctx context.Context, event GovernanceAuditEvent) error
+	ListByApprovalRequest(ctx context.Context, approvalRequestID ApprovalRequestID, limit int, offset int) ([]GovernanceAuditEvent, error)
+	ListByModule(ctx context.Context, moduleID ModuleID, limit int, offset int) ([]GovernanceAuditEvent, error)
 }
 
 type RegistryTransactionManager interface {

@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/alryzden/ProtoRadar/internal/domain"
+	"github.com/alryzden/ProtoRadar/internal/edition"
+	"github.com/alryzden/ProtoRadar/internal/version"
 )
 
 const (
@@ -17,6 +19,14 @@ const (
 )
 
 type Service struct {
+	registry   registryQueries
+	graph      graphQueries
+	runtime    runtimeQueries
+	governance governanceQueries
+	edition    editionQueries
+}
+
+type registryQueries struct {
 	modules        domain.ModuleRepository
 	gitLabProjects domain.ModuleGitLabProjectRepository
 	versions       domain.ModuleVersionRepository
@@ -24,8 +34,31 @@ type Service struct {
 	bufConfigs     domain.BufConfigRepository
 	metadata       domain.DescriptorMetadataRepository
 	reports        domain.BreakingReportRepository
-	dependencies   domain.ModuleDependencyRepository
-	runtime        domain.RuntimeInventoryRepository
+}
+
+type graphQueries struct {
+	dependencies domain.ModuleDependencyRepository
+}
+
+type runtimeQueries struct {
+	inventory domain.RuntimeInventoryRepository
+}
+
+type governanceQueries struct {
+	owners    domain.ModuleOwnerRepository
+	approvals domain.ApprovalRepository
+	audit     domain.GovernanceAuditRepository
+}
+
+type editionQueries struct {
+	capabilities edition.CapabilityChecker
+	buildInfo    version.BuildInfo
+}
+
+type GovernanceRepositories struct {
+	Owners    domain.ModuleOwnerRepository
+	Approvals domain.ApprovalRepository
+	Audit     domain.GovernanceAuditRepository
 }
 
 func NewService(
@@ -38,22 +71,60 @@ func NewService(
 	reports domain.BreakingReportRepository,
 	dependencies domain.ModuleDependencyRepository,
 	runtime domain.RuntimeInventoryRepository,
+	governance GovernanceRepositories,
+	capabilities edition.CapabilityChecker,
+	buildInfo version.BuildInfo,
 ) *Service {
+	if capabilities == nil {
+		capabilities = edition.NewCommunityCapabilityChecker()
+	}
+	if buildInfo.Version == "" {
+		buildInfo = version.Info()
+	}
 	return &Service{
-		modules:        modules,
-		gitLabProjects: gitLabProjects,
-		versions:       versions,
-		artifacts:      artifacts,
-		bufConfigs:     bufConfigs,
-		metadata:       metadata,
-		reports:        reports,
-		dependencies:   dependencies,
-		runtime:        runtime,
+		registry: registryQueries{
+			modules:        modules,
+			gitLabProjects: gitLabProjects,
+			versions:       versions,
+			artifacts:      artifacts,
+			bufConfigs:     bufConfigs,
+			metadata:       metadata,
+			reports:        reports,
+		},
+		graph:   graphQueries{dependencies: dependencies},
+		runtime: runtimeQueries{inventory: runtime},
+		governance: governanceQueries{
+			owners:    governance.Owners,
+			approvals: governance.Approvals,
+			audit:     governance.Audit,
+		},
+		edition: editionQueries{
+			capabilities: capabilities,
+			buildInfo:    buildInfo,
+		},
 	}
 }
 
+func (svc *Service) GetEdition(ctx context.Context, input GetEditionInput) (EditionDetails, error) {
+	model := edition.NewCommunityEdition(ctx, svc.edition.buildInfo, svc.edition.capabilities)
+	capabilities := make([]CapabilityStatus, 0, len(model.Capabilities))
+	for _, status := range model.Capabilities {
+		capabilities = append(capabilities, CapabilityStatus{
+			Name:    status.Capability.String(),
+			Enabled: status.Enabled,
+		})
+	}
+	return EditionDetails{
+		Edition:      model.Name,
+		Version:      model.Version.Version,
+		Commit:       model.Version.Commit,
+		BuildDate:    model.Version.BuildDate,
+		Capabilities: capabilities,
+	}, nil
+}
+
 func (svc *Service) ListModuleOverviews(ctx context.Context, input ListModuleOverviewsInput) ([]ModuleOverview, error) {
-	modules, err := svc.modules.List(ctx, defaultListLimit, 0)
+	modules, err := svc.registry.modules.List(ctx, defaultListLimit, 0)
 	if err != nil {
 		return nil, err
 	}
@@ -90,24 +161,24 @@ func (svc *Service) GetVersionOverview(ctx context.Context, input GetVersionOver
 	if err != nil {
 		return VersionOverview{}, domain.ErrInvalidVersion
 	}
-	version, err := svc.versions.GetByModuleAndVersion(ctx, module.ID, versionValue)
+	moduleVersion, err := svc.registry.versions.GetByModuleAndVersion(ctx, module.ID, versionValue)
 	if err != nil {
 		return VersionOverview{}, err
 	}
 
-	artifacts, err := svc.artifactsForVersion(ctx, version.ID)
+	artifacts, err := svc.artifactsForVersion(ctx, moduleVersion.ID)
 	if err != nil {
 		return VersionOverview{}, err
 	}
-	config, lintStatus, err := svc.bufConfigForVersion(ctx, version.ID)
+	config, lintStatus, err := svc.bufConfigForVersion(ctx, moduleVersion.ID)
 	if err != nil {
 		return VersionOverview{}, err
 	}
-	metadataSummary, err := svc.metadataSummaryForVersion(ctx, version.ID)
+	metadataSummary, err := svc.metadataSummaryForVersion(ctx, moduleVersion.ID)
 	if err != nil {
 		return VersionOverview{}, err
 	}
-	metadata, err := svc.metadataForVersion(ctx, version.ID)
+	metadata, err := svc.metadataForVersion(ctx, moduleVersion.ID)
 	if err != nil {
 		return VersionOverview{}, err
 	}
@@ -117,15 +188,15 @@ func (svc *Service) GetVersionOverview(ctx context.Context, input GetVersionOver
 	}
 	related := make([]BreakingReportSummary, 0)
 	for _, report := range relatedReports {
-		if report.BaseVersionID == version.ID || report.BaseVersion.String() == version.Version.String() {
+		if report.BaseVersionID == moduleVersion.ID || report.BaseVersion.String() == moduleVersion.Version.String() {
 			related = append(related, breakingReportSummary(report))
 		}
 	}
 
-	versionSummary := versionSummary(version, artifacts, lintStatus, metadataSummary)
+	summary := versionSummary(moduleVersion, artifacts, lintStatus, metadataSummary)
 	return VersionOverview{
 		Module:         moduleInfo(module),
-		Version:        versionSummary,
+		Version:        summary,
 		Artifacts:      artifacts,
 		BufConfig:      bufConfigSummary(config, lintStatus),
 		Metadata:       metadata,
@@ -163,7 +234,7 @@ func (svc *Service) GetBreakingReportDetails(ctx context.Context, input GetBreak
 	if reportID == "" {
 		return BreakingReportDetails{}, domain.ErrNotFound
 	}
-	report, changes, err := svc.reports.GetByID(ctx, reportID)
+	report, changes, err := svc.registry.reports.GetByID(ctx, reportID)
 	if err != nil {
 		return BreakingReportDetails{}, err
 	}
@@ -179,13 +250,50 @@ func (svc *Service) GetBreakingReportDetails(ctx context.Context, input GetBreak
 	if err != nil {
 		return BreakingReportDetails{}, err
 	}
+	var approval *ApprovalRequestSummary
+	if svc.governanceApprovalsAvailable() {
+		request, err := svc.governance.approvals.GetRequestByBreakingReportID(ctx, report.ID)
+		if err != nil && !errors.Is(err, domain.ErrNotFound) {
+			return BreakingReportDetails{}, err
+		}
+		if err == nil {
+			summary := approvalRequestSummary(request)
+			approval = &summary
+		}
+	}
 	return BreakingReportDetails{
 		Report:          breakingReportSummary(report),
 		Summary:         report.HumanSummary,
 		Changes:         items,
 		AffectedModules: affected,
 		RuntimeImpact:   runtimeImpact,
+		Approval:        approval,
 	}, nil
+}
+
+func (svc *Service) GetApprovalRequestDetails(ctx context.Context, input GetApprovalRequestDetailsInput) (ApprovalRequestDetails, error) {
+	if !svc.governanceApprovalsAvailable() {
+		return ApprovalRequestDetails{}, domain.ErrNotFound
+	}
+	requestID := domain.NewApprovalRequestID(input.RequestID)
+	if requestID == "" {
+		return ApprovalRequestDetails{}, domain.ErrNotFound
+	}
+	request, err := svc.governance.approvals.GetRequestByID(ctx, requestID)
+	if err != nil {
+		return ApprovalRequestDetails{}, err
+	}
+	events := []GovernanceAuditEventSummary{}
+	if svc.governanceAuditAvailable() {
+		stored, err := svc.governance.audit.ListByApprovalRequest(ctx, requestID, defaultReportsLimit, 0)
+		if err != nil && !errors.Is(err, domain.ErrNotFound) {
+			return ApprovalRequestDetails{}, err
+		}
+		if err == nil {
+			events = governanceAuditEvents(stored)
+		}
+	}
+	return ApprovalRequestDetails{Request: approvalRequestSummary(request), AuditEvents: events}, nil
 }
 
 func (svc *Service) GetModuleDependencyGraph(ctx context.Context, input GetModuleDependencyGraphInput) (ModuleDependencyGraph, error) {
@@ -193,18 +301,18 @@ func (svc *Service) GetModuleDependencyGraph(ctx context.Context, input GetModul
 	if err != nil {
 		return ModuleDependencyGraph{}, err
 	}
-	if svc.dependencies == nil {
-		return ModuleDependencyGraph{Module: moduleInfo(module), Downstream: []DependencyModule{}, Upstream: []DependencyModule{}, Unresolved: []UnresolvedDependency{}}, nil
+	if !svc.dependencyGraphAvailable() {
+		return emptyDependencyGraph(module), nil
 	}
-	upstream, err := svc.dependencies.ListUpstreamByModule(ctx, module.ID)
+	upstream, err := svc.graph.dependencies.ListUpstreamByModule(ctx, module.ID)
 	if err != nil {
 		return ModuleDependencyGraph{}, err
 	}
-	downstream, err := svc.dependencies.ListDownstreamByModule(ctx, module.ID)
+	downstream, err := svc.graph.dependencies.ListDownstreamByModule(ctx, module.ID)
 	if err != nil {
 		return ModuleDependencyGraph{}, err
 	}
-	unresolved, err := svc.dependencies.ListUnresolvedByModule(ctx, module.ID)
+	unresolved, err := svc.graph.dependencies.ListUnresolvedByModule(ctx, module.ID)
 	if err != nil {
 		return ModuleDependencyGraph{}, err
 	}
@@ -217,10 +325,10 @@ func (svc *Service) GetModuleDependencyGraph(ctx context.Context, input GetModul
 }
 
 func (svc *Service) ListRuntimeServices(ctx context.Context, input ListRuntimeServicesInput) ([]RuntimeServiceSummary, error) {
-	if svc.runtime == nil {
+	if !svc.runtimeQueriesAvailable() {
 		return []RuntimeServiceSummary{}, nil
 	}
-	summaries, err := svc.runtime.ListRuntimeServices(ctx, defaultListLimit, 0)
+	summaries, err := svc.runtime.inventory.ListRuntimeServices(ctx, defaultListLimit, 0)
 	if err != nil {
 		return nil, err
 	}
@@ -254,14 +362,14 @@ func (svc *Service) ListRuntimeServices(ctx context.Context, input ListRuntimeSe
 }
 
 func (svc *Service) GetRuntimeServiceDetails(ctx context.Context, input GetRuntimeServiceDetailsInput) (RuntimeServiceDetails, error) {
-	if svc.runtime == nil {
+	if !svc.runtimeQueriesAvailable() {
 		return RuntimeServiceDetails{}, domain.ErrNotFound
 	}
 	serviceName, err := domain.NewRuntimeServiceName(input.Service)
 	if err != nil {
 		return RuntimeServiceDetails{}, domain.ErrNotFound
 	}
-	details, err := svc.runtime.GetRuntimeServiceDetails(ctx, serviceName)
+	details, err := svc.runtime.inventory.GetRuntimeServiceDetails(ctx, serviceName)
 	if err != nil {
 		return RuntimeServiceDetails{}, err
 	}
@@ -269,32 +377,32 @@ func (svc *Service) GetRuntimeServiceDetails(ctx context.Context, input GetRunti
 }
 
 func (svc *Service) GetRuntimeEnvironmentInventory(ctx context.Context, input GetRuntimeEnvironmentInventoryInput) (RuntimeEnvironmentInventory, error) {
-	if svc.runtime == nil {
-		return RuntimeEnvironmentInventory{Environment: strings.TrimSpace(input.Environment), Deployments: []RuntimeDeployment{}, Usages: []RuntimeModuleUsage{}}, nil
+	if !svc.runtimeQueriesAvailable() {
+		return emptyRuntimeEnvironmentInventory(strings.TrimSpace(input.Environment)), nil
 	}
 	environment, err := domain.NewRuntimeEnvironment(input.Environment)
 	if err != nil {
 		return RuntimeEnvironmentInventory{}, domain.ErrInvalidRuntimeEnvironment
 	}
-	inventory, err := svc.runtime.ListRuntimeEnvironmentInventory(ctx, environment, defaultListLimit, 0)
+	inventory, err := svc.runtime.inventory.ListRuntimeEnvironmentInventory(ctx, environment, defaultListLimit, 0)
 	if err != nil && !errors.Is(err, domain.ErrNotFound) {
 		return RuntimeEnvironmentInventory{}, err
 	}
 	if err != nil {
-		return RuntimeEnvironmentInventory{Environment: environment.String(), Deployments: []RuntimeDeployment{}, Usages: []RuntimeModuleUsage{}}, nil
+		return emptyRuntimeEnvironmentInventoryResult(environment.String())
 	}
 	return runtimeEnvironmentInventory(inventory), nil
 }
 
 func (svc *Service) GetModuleRuntimeUsages(ctx context.Context, input GetModuleRuntimeUsagesInput) (ModuleRuntimeUsages, error) {
-	if svc.runtime == nil {
+	if !svc.runtimeQueriesAvailable() {
 		return ModuleRuntimeUsages{}, domain.ErrNotFound
 	}
 	module, err := svc.moduleByName(ctx, input.Module)
 	if err != nil {
 		return ModuleRuntimeUsages{}, err
 	}
-	usages, err := svc.runtime.ListModuleRuntimeUsages(ctx, module.ID, defaultListLimit, 0)
+	usages, err := svc.runtime.inventory.ListModuleRuntimeUsages(ctx, module.ID, defaultListLimit, 0)
 	if err != nil && !errors.Is(err, domain.ErrNotFound) {
 		return ModuleRuntimeUsages{}, err
 	}
@@ -302,7 +410,7 @@ func (svc *Service) GetModuleRuntimeUsages(ctx context.Context, input GetModuleR
 		usages = []domain.ModuleRuntimeUsage{}
 	}
 	latestVersion := ""
-	latest, err := svc.versions.GetLatestByModule(ctx, module.ID)
+	latest, err := svc.registry.versions.GetLatestByModule(ctx, module.ID)
 	if err != nil && !errors.Is(err, domain.ErrNotFound) {
 		return ModuleRuntimeUsages{}, err
 	}
@@ -317,7 +425,7 @@ func (svc *Service) GetBreakingReportRuntimeImpact(ctx context.Context, input Ge
 	if reportID == "" {
 		return nil, domain.ErrNotFound
 	}
-	report, _, err := svc.reports.GetByID(ctx, reportID)
+	report, _, err := svc.registry.reports.GetByID(ctx, reportID)
 	if err != nil {
 		return nil, err
 	}
@@ -329,11 +437,11 @@ func (svc *Service) moduleByName(ctx context.Context, moduleName string) (domain
 	if err != nil {
 		return domain.Module{}, domain.ErrInvalidModuleName
 	}
-	return svc.modules.GetByName(ctx, name)
+	return svc.registry.modules.GetByName(ctx, name)
 }
 
 func (svc *Service) moduleOverview(ctx context.Context, module domain.Module, includeDetails bool) (ModuleOverview, error) {
-	versions, err := svc.versions.ListByModule(ctx, module.ID, defaultVersionsLimit, 0)
+	versions, err := svc.registry.versions.ListByModule(ctx, module.ID, defaultVersionsLimit, 0)
 	if err != nil && !errors.Is(err, domain.ErrNotFound) {
 		return ModuleOverview{}, err
 	}
@@ -341,6 +449,10 @@ func (svc *Service) moduleOverview(ctx context.Context, module domain.Module, in
 		versions = []domain.ModuleVersion{}
 	}
 	reports, err := svc.reportsForModule(ctx, module.ID, defaultReportsLimit)
+	if err != nil {
+		return ModuleOverview{}, err
+	}
+	owners, err := svc.moduleOwners(ctx, module.ID)
 	if err != nil {
 		return ModuleOverview{}, err
 	}
@@ -367,8 +479,8 @@ func (svc *Service) moduleOverview(ctx context.Context, module domain.Module, in
 	}
 
 	var mapping *GitLabProjectInfo
-	if svc.gitLabProjects != nil {
-		stored, err := svc.gitLabProjects.GetByModuleID(ctx, module.ID)
+	if svc.registry.gitLabProjects != nil {
+		stored, err := svc.registry.gitLabProjects.GetByModuleID(ctx, module.ID)
 		if err != nil && !errors.Is(err, domain.ErrNotFound) {
 			return ModuleOverview{}, err
 		}
@@ -384,7 +496,7 @@ func (svc *Service) moduleOverview(ctx context.Context, module domain.Module, in
 		latest = &latestValue
 	}
 	if latest == nil {
-		latestVersion, err := svc.versions.GetLatestByModule(ctx, module.ID)
+		latestVersion, err := svc.registry.versions.GetLatestByModule(ctx, module.ID)
 		if err != nil && !errors.Is(err, domain.ErrNotFound) {
 			return ModuleOverview{}, err
 		}
@@ -411,13 +523,32 @@ func (svc *Service) moduleOverview(ctx context.Context, module domain.Module, in
 		LastPublishedOrSeen: latestOrModuleTime(module, latest, reportItems),
 		BreakingReportCount: len(reports),
 		LastBreakingStatus:  lastStatus,
+		Owners:              owners,
 		Versions:            versionItems,
 		RecentReports:       reportItems,
 	}, nil
 }
 
+func (svc *Service) moduleOwners(ctx context.Context, moduleID domain.ModuleID) ([]ModuleOwner, error) {
+	if !svc.governanceOwnersAvailable() {
+		return []ModuleOwner{}, nil
+	}
+	owners, err := svc.governance.owners.ListByModule(ctx, moduleID)
+	if err != nil && !errors.Is(err, domain.ErrNotFound) {
+		return nil, err
+	}
+	if err != nil {
+		return emptyModuleOwnersResult()
+	}
+	items := make([]ModuleOwner, 0, len(owners))
+	for _, owner := range owners {
+		items = append(items, moduleOwner(owner))
+	}
+	return items, nil
+}
+
 func (svc *Service) artifactsForVersion(ctx context.Context, versionID domain.ModuleVersionID) ([]ArtifactSummary, error) {
-	artifacts, err := svc.artifacts.ListByModuleVersion(ctx, versionID)
+	artifacts, err := svc.registry.artifacts.ListByModuleVersion(ctx, versionID)
 	if err != nil && !errors.Is(err, domain.ErrNotFound) {
 		return nil, err
 	}
@@ -429,34 +560,34 @@ func (svc *Service) artifactsForVersion(ctx context.Context, versionID domain.Mo
 }
 
 func (svc *Service) bufConfigForVersion(ctx context.Context, versionID domain.ModuleVersionID) (domain.BufConfigInfo, string, error) {
-	config, err := svc.bufConfigs.GetByModuleVersion(ctx, versionID)
+	config, err := svc.registry.bufConfigs.GetByModuleVersion(ctx, versionID)
 	if err != nil && !errors.Is(err, domain.ErrNotFound) {
 		return domain.BufConfigInfo{}, "", err
 	}
 	if err != nil {
-		return domain.BufConfigInfo{}, domain.BufLintStatusNotRun.String(), nil
+		return missingBufConfigResult()
 	}
 	return config, lintStatusFromConfig(config), nil
 }
 
 func (svc *Service) metadataSummaryForVersion(ctx context.Context, versionID domain.ModuleVersionID) (DescriptorMetadataSummary, error) {
-	summary, err := svc.metadata.GetSummaryByModuleVersion(ctx, versionID)
+	summary, err := svc.registry.metadata.GetSummaryByModuleVersion(ctx, versionID)
 	if err != nil && !errors.Is(err, domain.ErrNotFound) {
 		return DescriptorMetadataSummary{}, err
 	}
 	if err != nil {
-		return DescriptorMetadataSummary{}, nil
+		return emptyMetadataSummaryResult()
 	}
 	return descriptorMetadataSummary(summary), nil
 }
 
 func (svc *Service) metadataForVersion(ctx context.Context, versionID domain.ModuleVersionID) (DescriptorMetadata, error) {
-	metadata, err := svc.metadata.GetByModuleVersion(ctx, versionID)
+	metadata, err := svc.registry.metadata.GetByModuleVersion(ctx, versionID)
 	if err != nil && !errors.Is(err, domain.ErrNotFound) {
 		return DescriptorMetadata{}, err
 	}
 	if err != nil {
-		return DescriptorMetadata{Files: []ProtoFile{}}, nil
+		return emptyDescriptorMetadataResult()
 	}
 	if metadata.Files == nil {
 		metadata.Files = []domain.ProtoFile{}
@@ -465,7 +596,7 @@ func (svc *Service) metadataForVersion(ctx context.Context, versionID domain.Mod
 }
 
 func (svc *Service) reportsForModule(ctx context.Context, moduleID domain.ModuleID, limit int) ([]domain.BreakingReport, error) {
-	reports, err := svc.reports.ListByModule(ctx, moduleID, limit, 0)
+	reports, err := svc.registry.reports.ListByModule(ctx, moduleID, limit, 0)
 	if err != nil && !errors.Is(err, domain.ErrNotFound) {
 		return nil, err
 	}
@@ -483,7 +614,7 @@ func (svc *Service) listReports(ctx context.Context, moduleFilter string, limit 
 		}
 		return svc.reportsForModule(ctx, module.ID, limit)
 	}
-	modules, err := svc.modules.List(ctx, defaultListLimit, 0)
+	modules, err := svc.registry.modules.List(ctx, defaultListLimit, 0)
 	if err != nil {
 		return nil, err
 	}
@@ -499,10 +630,10 @@ func (svc *Service) listReports(ctx context.Context, moduleFilter string, limit 
 }
 
 func (svc *Service) affectedModules(ctx context.Context, moduleID domain.ModuleID) ([]DependencyModule, error) {
-	if svc.dependencies == nil {
+	if !svc.dependencyGraphAvailable() {
 		return []DependencyModule{}, nil
 	}
-	affected, err := svc.dependencies.ListAffectedModules(ctx, moduleID)
+	affected, err := svc.graph.dependencies.ListAffectedModules(ctx, moduleID)
 	if err != nil {
 		return nil, err
 	}
@@ -537,17 +668,17 @@ func dependencyModules(dependencies []domain.ModuleDependency, upstream bool) []
 	indexes := map[string]int{}
 	for _, dependency := range dependencies {
 		moduleName := dependency.ProviderModuleName.String()
-		version := dependency.ProviderVersion.String()
+		moduleVersion := dependency.ProviderVersion.String()
 		if !upstream {
 			moduleName = dependency.ConsumerModuleName.String()
-			version = dependency.ConsumerVersion.String()
+			moduleVersion = dependency.ConsumerVersion.String()
 		}
-		key := moduleName + "\x00" + version
+		key := moduleName + "\x00" + moduleVersion
 		index, exists := indexes[key]
 		if !exists {
 			index = len(groups)
 			indexes[key] = index
-			groups = append(groups, group{module: moduleName, version: version, sources: map[string]struct{}{}, reasons: map[string]struct{}{}})
+			groups = append(groups, group{module: moduleName, version: moduleVersion, sources: map[string]struct{}{}, reasons: map[string]struct{}{}})
 		}
 		groups[index].sources[dependency.Source.String()] = struct{}{}
 		reason := dependency.Reason.String()
@@ -681,23 +812,195 @@ func runtimeImpacts(impacts []domain.RuntimeImpact) []RuntimeImpact {
 			ReportedAt:   impact.ReportedAt,
 			ImpactStatus: impact.ImpactStatus.String(),
 			Reason:       impact.Reason,
+			DriftStatus:  impact.DriftStatus.String(),
+			DriftReason:  impact.DriftReason,
+		})
+	}
+	return items
+}
+
+func moduleOwner(owner domain.ModuleOwner) ModuleOwner {
+	return ModuleOwner{
+		ID:          owner.ID.String(),
+		ModuleID:    owner.ModuleID.String(),
+		ModuleName:  owner.ModuleName.String(),
+		SubjectType: owner.SubjectType.String(),
+		Subject:     owner.Subject,
+		Role:        owner.Role.String(),
+		CreatedAt:   owner.CreatedAt,
+		UpdatedAt:   owner.UpdatedAt,
+	}
+}
+
+func approvalRequestSummary(request domain.ApprovalRequest) ApprovalRequestSummary {
+	requirements := make([]ApprovalRequirementSummary, 0, len(request.Requirements))
+	for _, requirement := range request.Requirements {
+		requirements = append(requirements, approvalRequirementSummary(requirement))
+	}
+	decisions := make([]ApprovalDecisionSummary, 0, len(request.Decisions))
+	for _, decision := range request.Decisions {
+		decisions = append(decisions, approvalDecisionSummary(decision))
+	}
+	breakingReportID := ""
+	if request.BreakingReportID != nil {
+		breakingReportID = request.BreakingReportID.String()
+	}
+	return ApprovalRequestSummary{
+		ID:                request.ID.String(),
+		ModuleID:          request.ModuleID.String(),
+		ModuleName:        request.ModuleName.String(),
+		BreakingReportID:  breakingReportID,
+		TargetRef:         request.TargetRef,
+		Status:            request.Status.String(),
+		RequiredApprovals: request.RequiredApprovals,
+		ReceivedApprovals: request.ReceivedApprovals,
+		Requirements:      requirements,
+		Decisions:         decisions,
+		CreatedAt:         request.CreatedAt,
+		UpdatedAt:         request.UpdatedAt,
+	}
+}
+
+func approvalRequirementSummary(requirement domain.ApprovalRequirement) ApprovalRequirementSummary {
+	targetModuleID := ""
+	if requirement.TargetModuleID != nil {
+		targetModuleID = requirement.TargetModuleID.String()
+	}
+	return ApprovalRequirementSummary{
+		ID:                requirement.ID.String(),
+		ApprovalRequestID: requirement.ApprovalRequestID.String(),
+		RequirementType:   requirement.RequirementType.String(),
+		TargetModuleID:    targetModuleID,
+		TargetModuleName:  requirement.TargetModuleName.String(),
+		RequiredRole:      requirement.RequiredRole.String(),
+		Status:            requirement.Status.String(),
+		Reason:            requirement.Reason,
+		CreatedAt:         requirement.CreatedAt,
+		UpdatedAt:         requirement.UpdatedAt,
+	}
+}
+
+func approvalDecisionSummary(decision domain.ApprovalDecision) ApprovalDecisionSummary {
+	return ApprovalDecisionSummary{
+		ID:                decision.ID.String(),
+		ApprovalRequestID: decision.ApprovalRequestID.String(),
+		RequirementID:     decision.RequirementID.String(),
+		Decision:          decision.Decision.String(),
+		DecidedBy:         decision.DecidedBy,
+		Comment:           decision.Comment,
+		CreatedAt:         decision.CreatedAt,
+	}
+}
+
+func governanceAuditEvents(events []domain.GovernanceAuditEvent) []GovernanceAuditEventSummary {
+	items := make([]GovernanceAuditEventSummary, 0, len(events))
+	for _, event := range events {
+		moduleID := ""
+		if event.ModuleID != nil {
+			moduleID = event.ModuleID.String()
+		}
+		approvalRequestID := ""
+		if event.ApprovalRequestID != nil {
+			approvalRequestID = event.ApprovalRequestID.String()
+		}
+		breakingReportID := ""
+		if event.BreakingReportID != nil {
+			breakingReportID = event.BreakingReportID.String()
+		}
+		items = append(items, GovernanceAuditEventSummary{
+			ID:                event.ID.String(),
+			EventType:         event.EventType.String(),
+			Actor:             event.Actor,
+			ModuleID:          moduleID,
+			ModuleName:        event.ModuleName.String(),
+			ApprovalRequestID: approvalRequestID,
+			BreakingReportID:  breakingReportID,
+			PayloadJSON:       string(event.PayloadJSON),
+			CreatedAt:         event.CreatedAt,
 		})
 	}
 	return items
 }
 
 func (svc *Service) runtimeImpact(ctx context.Context, reportID domain.BreakingReportID, baseVersionID domain.ModuleVersionID) ([]RuntimeImpact, error) {
-	if svc.runtime == nil {
-		return []RuntimeImpact{}, nil
+	if !svc.runtimeQueriesAvailable() {
+		return emptyRuntimeImpact(), nil
 	}
-	impacts, err := svc.runtime.ListRuntimeImpactByModuleVersion(ctx, reportID, baseVersionID, defaultListLimit, 0)
+	impacts, err := svc.runtime.inventory.ListRuntimeImpactByModuleVersion(ctx, reportID, baseVersionID, defaultListLimit, 0)
 	if err != nil && !errors.Is(err, domain.ErrNotFound) {
 		return nil, err
 	}
 	if err != nil {
-		return []RuntimeImpact{}, nil
+		return emptyRuntimeImpactResult()
 	}
 	return runtimeImpacts(impacts), nil
+}
+
+// Optional UI sections render as empty when their query dependency is not wired.
+// That keeps Community pages usable while preserving the UI query boundary.
+func (svc *Service) runtimeQueriesAvailable() bool {
+	return svc.runtime.inventory != nil
+}
+
+func (svc *Service) dependencyGraphAvailable() bool {
+	return svc.graph.dependencies != nil
+}
+
+func (svc *Service) governanceOwnersAvailable() bool {
+	return svc.governance.owners != nil
+}
+
+func (svc *Service) governanceApprovalsAvailable() bool {
+	return svc.governance.approvals != nil
+}
+
+func (svc *Service) governanceAuditAvailable() bool {
+	return svc.governance.audit != nil
+}
+
+func emptyDependencyGraph(module domain.Module) ModuleDependencyGraph {
+	return ModuleDependencyGraph{
+		Module:     moduleInfo(module),
+		Downstream: []DependencyModule{},
+		Upstream:   []DependencyModule{},
+		Unresolved: []UnresolvedDependency{},
+	}
+}
+
+func emptyRuntimeEnvironmentInventory(environment string) RuntimeEnvironmentInventory {
+	return RuntimeEnvironmentInventory{
+		Environment: environment,
+		Deployments: []RuntimeDeployment{},
+		Usages:      []RuntimeModuleUsage{},
+	}
+}
+
+func emptyRuntimeEnvironmentInventoryResult(environment string) (RuntimeEnvironmentInventory, error) {
+	return emptyRuntimeEnvironmentInventory(environment), nil
+}
+
+func emptyModuleOwnersResult() ([]ModuleOwner, error) {
+	return []ModuleOwner{}, nil
+}
+
+func missingBufConfigResult() (domain.BufConfigInfo, string, error) {
+	return domain.BufConfigInfo{}, domain.BufLintStatusNotRun.String(), nil
+}
+
+func emptyMetadataSummaryResult() (DescriptorMetadataSummary, error) {
+	return DescriptorMetadataSummary{}, nil
+}
+
+func emptyDescriptorMetadataResult() (DescriptorMetadata, error) {
+	return DescriptorMetadata{Files: []ProtoFile{}}, nil
+}
+
+func emptyRuntimeImpact() []RuntimeImpact {
+	return []RuntimeImpact{}
+}
+
+func emptyRuntimeImpactResult() ([]RuntimeImpact, error) {
+	return emptyRuntimeImpact(), nil
 }
 
 func runtimeSummaryHasEnvironment(summary RuntimeServiceSummary, environment string) bool {
@@ -752,16 +1055,16 @@ func gitLabProjectInfo(mapping domain.ModuleGitLabProject) GitLabProjectInfo {
 	}
 }
 
-func versionSummary(version domain.ModuleVersion, artifacts []ArtifactSummary, lintStatus string, metadataSummary DescriptorMetadataSummary) VersionSummary {
+func versionSummary(moduleVersion domain.ModuleVersion, artifacts []ArtifactSummary, lintStatus string, metadataSummary DescriptorMetadataSummary) VersionSummary {
 	if artifacts == nil {
 		artifacts = []ArtifactSummary{}
 	}
 	return VersionSummary{
-		Version:         version.Version.String(),
-		Status:          version.Status.String(),
-		Digest:          version.Digest,
-		CreatedAt:       version.CreatedAt,
-		PublishedAt:     version.PublishedAt,
+		Version:         moduleVersion.Version.String(),
+		Status:          moduleVersion.Status.String(),
+		Digest:          moduleVersion.Digest,
+		CreatedAt:       moduleVersion.CreatedAt,
+		PublishedAt:     moduleVersion.PublishedAt,
 		Artifacts:       artifacts,
 		LintStatus:      lintStatus,
 		MetadataSummary: metadataSummary,
